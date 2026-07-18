@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Dynamics Lab — Vibration Apparatus HMI</title>
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<!-- ============================= SPLASH ============================= -->
+<section id="screen-splash" class="screen active visible">
+  <div class="splash-content">
+    <img src="assets/dynamics-logo.png" alt="Dynamics Lab logo" class="splash-logo" />
+    <p class="splash-subtitle">Vibration Demo Apparatus — Web HMI</p>
+    <p class="splash-loading">Loading</p>
+    <div>
+      <button id="btn-splash-continue" class="btn btn-primary splash-continue">Continue</button>
+    </div>
+  </div>
+</section>
+
+<!-- ============================= STATUS ============================= -->
+<section id="screen-status" class="screen">
+  <header class="topbar">
+    <span class="topbar-title">DYNAMICS LAB — VIBRATION APPARATUS</span>
+  </header>
+
+  <div class="status-content">
+    <h1>Apparatus Status</h1>
+
+    <div class="status-row">
+      <span class="status-dot" id="dot-connection"></span>
+      <span class="status-label">PCB1 Connection</span>
+      <span class="status-detail" id="detail-connection">Not connected</span>
+      <button id="btn-connect" class="btn btn-primary">Connect to PCB1</button>
+    </div>
+
+    <div class="status-row">
+      <span class="status-dot" id="dot-accel"></span>
+      <span class="status-label">Accelerometer (ADS1220 / ADXL335)</span>
+      <span class="status-detail" id="detail-accel">Not checked</span>
+      <button id="btn-check-accel" class="btn" disabled>Run Check</button>
+    </div>
+
+    <p class="status-note">
+      Motor/encoder and RPM are verified live once you're on the dashboard
+      (there's no standalone motor self-test in the current firmware).
+    </p>
+
+    <button id="btn-enter-dashboard" class="btn btn-primary btn-large" disabled>
+      Continue to Dashboard
+    </button>
+
+    <button id="btn-skip-demo" class="btn btn-large">
+      Skip — Demo Mode (no hardware, simulated data)
+    </button>
+
+    <div class="log-panel">
+      <div class="log-panel-title">Serial Log</div>
+      <div id="log-output" class="log-output"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================= DASHBOARD ============================= -->
+<section id="screen-dashboard" class="screen">
+  <header class="topbar">
+    <span class="topbar-title">DYNAMICS LAB — VIBRATION APPARATUS</span>
+    <span class="topbar-status">
+      <span class="status-dot" id="dash-dot-connection"></span>
+      <span id="dash-connection-text">Disconnected</span>
+      <span class="mode-pill" id="dash-mode-pill">idle</span>
+    </span>
+  </header>
+
+  <div class="dashboard-grid">
+
+    <!-- ---- Device / apparatus panel ---- -->
+    <section class="panel panel-device" id="panel-device">
+      <h2>Apparatus</h2>
+      <p class="panel-hint">
+        Reference render of the vibration demo apparatus. The stroboscope
+        arm's actual deploy/retract motion is driven autonomously by the
+        separate StroboESP unit based on the strobe pulse train, not from
+        this HMI -- the image below just switches to match whether this
+        HMI's own strobe mode is running, not a live view of the physical
+        arm position.
+      </p>
+      <div class="apparatus-images">
+        <figure>
+          <img id="apparatus-image" src="assets/retracted - clear background.png" alt="Apparatus with stroboscope arm retracted" />
+          <figcaption id="apparatus-image-caption">Retracted</figcaption>
+        </figure>
+      </div>
+
+      <div class="device-status">
+        <div class="status-row">
+          <span class="status-dot" id="device-dot-connection"></span>
+          <span class="status-label">PCB1 Connection</span>
+          <span class="status-detail" id="device-connection-text">Disconnected</span>
+        </div>
+        <div class="status-row">
+          <span class="status-dot" id="device-dot-accel"></span>
+          <span class="status-label">Accelerometer (ADS1220 / ADXL335)</span>
+          <span class="status-detail" id="device-detail-accel">Not checked</span>
+          <button id="btn-device-check-accel" class="btn" disabled>Run Check</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---- Motor / RPM panel ---- -->
+    <section class="panel" id="panel-rpm">
+      <h2>Motor RPM Control</h2>
+      <p class="panel-hint">Closed-loop PI + feedforward target-RPM control (PCB1 mode l) -- set a target, the controller drives duty to reach it. Can run at the same time as the Accel panel's live stream.</p>
+      <div class="metric-row">
+        <div class="metric">
+          <span class="metric-value" id="rpm-target-value">0</span>
+          <span class="metric-label">Target RPM</span>
+        </div>
+        <div class="metric">
+          <span class="metric-value" id="rpm-measured-value">0</span>
+          <span class="metric-label">Measured RPM</span>
+        </div>
+        <div class="metric">
+          <span class="metric-value" id="rpm-raw-value">0</span>
+          <span class="metric-label">Raw RPM</span>
+        </div>
+        <div class="metric">
+          <span class="metric-value" id="rpm-duty-value">0</span>
+          <span class="metric-label">Commanded Duty</span>
+        </div>
+      </div>
+      <canvas class="chart" id="rpm-chart"></canvas>
+      <canvas class="chart" id="duty-chart"></canvas>
+
+      <div class="control-row">
+        <label for="rpm-target-slider">Target RPM</label>
+        <input type="range" id="rpm-target-slider" min="0" max="3400" value="0" />
+        <input type="number" id="rpm-target-number" min="0" max="3400" value="0" />
+      </div>
+      <div class="control-row">
+        <button id="btn-rpm-start" class="btn btn-primary">Start</button>
+        <button id="btn-rpm-stop" class="btn btn-danger" disabled>Stop</button>
+      </div>
+    </section>
+
+    <!-- ---- Accel data panel ---- -->
+    <section class="panel" id="panel-accel">
+      <h2>Vibration / Accel Data</h2>
+      <p class="panel-hint">Live decimated stream (~100 SPS, PCB1 mode l) -- can run at the same time as the RPM panel. Full-rate (~2330 SPS) quality captures for FFT/RMS analysis, bump test, and resonance sweeps stay on PCB1's serial menu -- this panel is for live monitoring only.</p>
+      <div class="metric-row">
+        <div class="metric">
+          <span class="metric-value" id="accel-rms-value">—</span>
+          <span class="metric-label">Amplitude RMS (g)</span>
+        </div>
+        <div class="metric">
+          <span class="metric-value" id="accel-crest-value">—</span>
+          <span class="metric-label">Crest Factor</span>
+        </div>
+      </div>
+      <canvas class="chart" id="accel-chart"></canvas>
+      <div class="control-row">
+        <button id="btn-accel-start" class="btn btn-primary">Start Live Stream</button>
+        <button id="btn-accel-stop" class="btn btn-danger" disabled>Stop</button>
+      </div>
+      <div class="control-row">
+        <button id="btn-logsum" class="btn" disabled>Log Summary (5 s)…</button>
+        <button id="btn-open-freevib" class="btn" disabled>Free Vibration…</button>
+      </div>
+      <p class="panel-hint">
+        <strong>Log Summary</strong> records 5 s at the full ~2330 SPS while
+        holding the current RPM, then shows 1 s of the raw waveform with the
+        encoder pulses marked — so you can measure the phase angle by hand before
+        letting the Bode sweep do it for you. Needs the live stream running.
+      </p>
+      <p class="panel-hint">
+        <strong>Free Vibration</strong> records the raw accelerometer trace for a
+        chosen time with the motor off — deflect the beam and release as you press
+        Start Record, then read the natural frequency and logarithmic-decrement
+        damping off the ring-down (the rig vibrates around ~2.5 Hz). Needs the
+        board idle.
+      </p>
+      <p class="panel-status" id="accel-status"></p>
+    </section>
+
+    <!-- ---- Strobo panel ---- -->
+    <section class="panel" id="panel-strobo">
+      <h2>Stroboscope Control</h2>
+      <p class="panel-hint">
+        Shaft speed is held at the target RPM by the closed-loop PI+feedforward
+        controller (same loop as the Motor panel), so it holds against the load
+        near resonance. Strobe rate = live measured RPM + delta; delta = 0
+        freezes the shaft.
+      </p>
+      <div class="control-row">
+        <label for="strobo-rpm">Target RPM</label>
+        <input type="number" id="strobo-rpm" min="0" max="3400" step="10" value="0" />
+      </div>
+      <div class="control-row">
+        <label for="strobo-delta">Delta RPM</label>
+        <input type="number" id="strobo-delta" value="0" />
+      </div>
+      <div class="control-row">
+        <button id="btn-strobo-start" class="btn btn-primary">Start Strobe</button>
+        <button id="btn-strobo-stop" class="btn btn-danger" disabled>Stop</button>
+      </div>
+      <div class="metric-row">
+        <div class="metric">
+          <span class="metric-value" id="strobo-rpm-value">0</span>
+          <span class="metric-label">Live RPM</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---- Auxiliary panel ---- -->
+    <section class="panel" id="panel-aux">
+      <h2>Auxiliary</h2>
+      <div class="control-row">
+        <label for="relay-toggle">Relay</label>
+        <button id="relay-toggle" class="btn toggle-btn on">ON</button>
+      </div>
+      <div class="log-panel">
+        <div class="log-panel-header">
+          <span class="log-panel-title">Serial Log</span>
+          <div class="log-tools">
+            <label class="log-tool-check"><input type="checkbox" id="log-hide-data" /> Hide R/V/K</label>
+            <button id="btn-log-save" class="btn btn-tiny">Save</button>
+            <button id="btn-log-clear" class="btn btn-tiny">Clear</button>
+          </div>
+        </div>
+        <div id="dash-log-output" class="log-output"></div>
+      </div>
+    </section>
+
+    <!-- ---- Advanced tests entry point (opens the modals below) ---- -->
+    <section class="panel" id="panel-tests">
+      <h2>Advanced Tests</h2>
+      <p class="panel-hint">Bounded measurement runs -- each opens in its own window over the dashboard. Starting one stops whatever's running in the main panels (PCB1 only runs one mode at a time).</p>
+      <div class="control-row">
+        <button id="btn-open-sweep" class="btn btn-primary">RPM Sweep / Bode Plot…</button>
+      </div>
+      <div class="control-row">
+        <button id="btn-open-bump" class="btn btn-primary">Bump Test…</button>
+      </div>
+    </section>
+
+  </div>
+
+  <footer class="app-footer">Made by Juan Aaron Norata (13122034) — 2026</footer>
+
+  <!-- ============================= SWEEP / BODE MODAL ============================= -->
+  <div class="modal-overlay" id="modal-sweep">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>RPM Sweep — Bode Plot</h2>
+        <button class="modal-close" id="btn-close-sweep" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="panel-hint">
+          Closed-loop RPM sweep -- logs accel amplitude and phase at each RPM
+          setpoint across the grid. Pick the <strong>Undamped</strong> case
+          (PCB1 mode r, reverse-cycle sweep that dodges the sharp resonance) or
+          the <strong>Damped</strong> case (mode r2, a straight low-to-high pass
+          for the broadened resonance -- requires the damper fitted). A full
+          sweep takes several minutes; Stop aborts early and keeps whatever
+          points were already collected. Save the finished run to a file, then
+          load previous runs back in to overlay them here for comparison (e.g.
+          undamped vs damped).
+        </p>
+        <div class="control-row">
+          <span class="control-label">Damping case</span>
+          <div class="segmented" role="group" aria-label="Sweep damping case">
+            <button type="button" id="sweep-mode-undamped" class="seg-btn active" aria-pressed="true">Undamped (r)</button>
+            <button type="button" id="sweep-mode-damped" class="seg-btn" aria-pressed="false">Damped (r2)</button>
+          </div>
+        </div>
+        <div class="control-row">
+          <button id="btn-sweep-start" class="btn btn-primary">Start Sweep</button>
+          <button id="btn-sweep-stop" class="btn btn-danger" disabled>Stop</button>
+          <button id="btn-sweep-save" class="btn" disabled>Save Run…</button>
+          <label class="file-btn">
+            Load Run(s)…
+            <input type="file" id="input-sweep-load" accept="application/json" multiple hidden />
+          </label>
+          <button id="btn-sweep-clear-overlays" class="btn">Clear Overlays</button>
+          <label for="sweep-resonance-hz">Resonance (Hz)</label>
+          <input type="number" id="sweep-resonance-hz" value="22.1" min="0" step="0.1" />
+        </div>
+        <p class="panel-status" id="sweep-status"></p>
+        <p class="panel-hint">
+          Hover a point on either plot for its exact RPM/amplitude or
+          RPM/phase reading (MATLAB-style data cursor). The dashed vertical
+          line marks the resonance frequency above, converted to RPM (Hz x 60).
+          Scroll to zoom in/out around the cursor, drag with the left mouse
+          button to pan around, double-click to reset the view.
+        </p>
+        <canvas class="chart chart-large" id="sweep-chart"></canvas>
+        <p class="panel-hint">
+          Phase of the 1x response relative to the encoder pulse: how far
+          after the trigger the accel peak lands, as a fraction of one
+          revolution. It runs 0&deg; well below resonance, crosses
+          <strong>90&deg;</strong> (dashed line) <em>at</em> the natural
+          frequency, and approaches 180&deg; above it -- the 90&deg; crossing
+          locates resonance more sharply than the amplitude peak. Points are
+          auto-zeroed against the sub-1000 RPM average to remove the fixed
+          mounting offset (raw values are kept in Save Run). Faded points had
+          too weak a 1x tone to trust the phase.
+        </p>
+        <canvas class="chart chart-phase" id="sweep-phase-chart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== DAMPER-ATTACH REMINDER POPUP ===================== -->
+  <!-- Shown when the user selects the Damped (r2) sweep case. r2 only makes
+       sense with the damper physically fitted, so this confirms it before the
+       mode switches. Higher z-index (modal-overlay-top) so it sits over the
+       open Sweep modal. -->
+  <div class="modal-overlay modal-overlay-top" id="modal-damper">
+    <div class="modal modal-narrow">
+      <div class="modal-header">
+        <h2>Attach the damper</h2>
+        <button class="modal-close" id="btn-damper-cancel-x" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="panel-hint">
+          The damped sweep (PCB1 mode <strong>r2</strong>) characterises the
+          apparatus <em>with</em> the damper fitted. Physically attach the
+          damper to the beam before starting -- otherwise the run just repeats
+          the undamped response under a damped label.
+        </p>
+        <div class="damper-images">
+          <figure>
+            <img src="assets/damper%20-%20unattached.png" alt="Damper not attached" />
+            <figcaption>Detached</figcaption>
+          </figure>
+          <div class="damper-arrow" aria-hidden="true">&rarr;</div>
+          <figure>
+            <img src="assets/damper%20-%20attached.png" alt="Damper attached to the beam" />
+            <figcaption>Attached</figcaption>
+          </figure>
+        </div>
+        <div class="control-row damper-actions">
+          <button id="btn-damper-confirm" class="btn btn-primary">Damper attached — use damped mode</button>
+          <button id="btn-damper-cancel" class="btn">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================= LOG SUMMARY MODAL ============================= -->
+  <div class="modal-overlay" id="modal-logsum">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Data Log Summary — Reading Phase by Hand</h2>
+        <button class="modal-close" id="btn-close-logsum" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="panel-hint">
+          PCB1 recorded <strong>5 s</strong> at the full ~2330 SPS while holding
+          the RPM; the statistics below use all of it, and the plot shows the
+          middle <strong>1 s</strong>. The gold vertical lines are
+          <strong>encoder pulses</strong> — one per revolution, fired as the
+          unbalance mass passes the inductive sensor.
+        </p>
+        <p class="panel-hint">
+          <strong>Measure to the trough, not the peak.</strong> The encoder fires
+          when the beam is at <em>maximum displacement</em> — but this sensor
+          measures <em>acceleration</em>, and a = −ω²x, so the accel trace is
+          <strong>upside-down</strong> relative to displacement. Max displacement
+          therefore shows up as the accel trace's <strong>lowest</strong> point.
+          The trough is where the beam actually is.
+        </p>
+        <p class="panel-hint">
+          <strong>To find the phase angle by hand:</strong> pick a gold pulse
+          line, find the <em>next</em> <strong>trough</strong> of the accel trace
+          after it, and read off the time gap Δt (hover the plot for exact
+          values). One revolution takes T = 60/RPM seconds. The phase angle is
+          then <strong>360° × Δt / T</strong>. Well below resonance the trough
+          sits almost on the pulse (<strong>≈0°</strong>); at resonance it lags a
+          quarter turn (<strong>90°</strong>); above resonance, half a turn
+          (<strong>180°</strong>). Scroll to zoom in on a couple of cycles, drag
+          to pan, double-click to reset.
+        </p>
+        <div class="metric-row" id="logsum-metrics">
+          <div class="metric">
+            <span class="metric-value" id="logsum-rpm">—</span>
+            <span class="metric-label">RPM (avg over 5 s)</span>
+          </div>
+          <div class="metric">
+            <span class="metric-value" id="logsum-amp">—</span>
+            <span class="metric-label">Accel amplitude (g)</span>
+          </div>
+          <div class="metric">
+            <span class="metric-value" id="logsum-period">—</span>
+            <span class="metric-label">T = 60/RPM (ms)</span>
+          </div>
+          <div class="metric">
+            <span class="metric-value" id="logsum-pulses">—</span>
+            <span class="metric-label">Pulses shown</span>
+          </div>
+        </div>
+        <p class="panel-status" id="logsum-status"></p>
+        <canvas class="chart chart-large" id="logsum-chart"></canvas>
+        <div class="control-row">
+          <button id="btn-logsum-reveal" class="btn">Reveal computed phase</button>
+          <span id="logsum-answer" class="logsum-answer"></span>
+          <span id="logsum-answer-raw" class="logsum-answer-raw"></span>
+        </div>
+        <p class="panel-hint" id="logsum-answer-note" hidden>
+          The big number is what PCB1's software lock-in measured from the same
+          capture — the same quantity you just read (pulse → trough, as a
+          fraction of a revolution), but computed from all ~11650 samples and
+          every pulse at once instead of one trough and one line. A few degrees
+          of disagreement is normal and expected: eyeballing a trough is
+          imprecise precisely <em>because</em> the waveform is flattest there.
+        </p>
+        <p class="panel-hint" id="logsum-raw-note" hidden>
+          <strong>Where the raw number comes from:</strong> the lock-in measures
+          pulse → accel <em>peak</em>, so it reads ≈180° more than your
+          displacement reading — that's the a = −ω²x inversion, subtracted out
+          above. Any <em>further</em> constant offset is sensor mounting angle,
+          which can't be known from a single capture. That's exactly why the
+          Bode sweep's phase plot normalises: it takes several
+          far-below-resonance points, calls their average 0°, and subtracts —
+          giving the clean 0 → 90 → 180 curve across the whole RPM range without
+          ever needing to know the mounting angle.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================= BUMP TEST MODAL ============================= -->
+  <div class="modal-overlay" id="modal-bump">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Bump Test</h2>
+        <button class="modal-close" id="btn-close-bump" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="panel-hint">
+          Triggered acquisition (PCB1 mode b) -- arms, waits for a
+          physical tap/bump exceeding the threshold, captures the decay
+          at full ~2330 SPS, then plots the time response and its FFT
+          here. Capture can't be aborted once triggered (same as a full
+          vibration capture) -- only the armed/waiting phase can. Hover
+          either plot for an exact reading (MATLAB-style data cursor);
+          the FFT plot also auto-marks its top peaks with frequency
+          labels. Scroll to zoom in/out around the cursor, drag with the
+          left mouse button to pan around, double-click to reset the view.
+        </p>
+        <div class="control-row">
+          <label for="bump-threshold">Threshold (g)</label>
+          <input type="number" id="bump-threshold" value="0.3" min="0.01" max="10" step="0.01" />
+          <label for="bump-duration">Duration (s)</label>
+          <input type="number" id="bump-duration" value="5" min="1" max="15" step="1" />
+        </div>
+        <div class="control-row">
+          <button id="btn-bump-start" class="btn btn-primary">Arm</button>
+          <button id="btn-bump-stop" class="btn btn-danger" disabled>Abort</button>
+          <button id="btn-bump-save" class="btn" disabled>Save Run…</button>
+        </div>
+        <p class="panel-status" id="bump-status"></p>
+        <canvas class="chart" id="bump-time-chart"></canvas>
+        <canvas class="chart" id="bump-fft-chart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================= FREE VIBRATION MODAL ============================= -->
+  <div class="modal-overlay" id="modal-freevib">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Free Vibration — Natural Frequency &amp; Damping</h2>
+        <button class="modal-close" id="btn-close-freevib" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="panel-hint">
+          Untriggered raw-accelerometer capture (PCB1 <code>freevib</code>) with
+          the motor off. <strong>Deflect the beam and let go right as you press
+          Start Record</strong> — the trace streams in live as the beam rings
+          down (~2.2–2.5 Hz). Measure the <strong>natural frequency</strong> (peak
+          spacing → period) and <strong>logarithmic-decrement damping</strong>
+          (how fast successive peaks shrink) with the data cursor: hover the
+          time plot for exact (t, accel) readings, scroll to zoom, drag to pan,
+          double-click to reset. The FFT below marks the dominant frequency.
+          The plotted trace is <strong>low-pass filtered</strong> (zero-phase, so
+          peaks keep their exact time and height) to strip sensor noise for clean
+          hand measurement — adjust the cutoff or tick <em>Show raw</em> to
+          compare; the untouched raw data is what gets saved.
+        </p>
+        <div class="control-row">
+          <label for="freevib-duration">Record time (s)</label>
+          <input type="number" id="freevib-duration" value="20" min="2" max="60" step="1" />
+          <button id="btn-freevib-start" class="btn btn-primary">Start Record</button>
+          <button id="btn-freevib-stop" class="btn btn-danger" disabled>Stop</button>
+          <button id="btn-freevib-save" class="btn" disabled>Save Run…</button>
+        </div>
+        <div class="control-row">
+          <label for="freevib-cutoff">Low-pass cutoff (Hz)</label>
+          <input type="number" id="freevib-cutoff" value="8" min="1" max="50" step="0.5" />
+          <label class="check-inline"><input type="checkbox" id="freevib-show-raw" /> Show raw (unfiltered)</label>
+        </div>
+        <p class="panel-status" id="freevib-status"></p>
+        <canvas class="chart chart-large" id="freevib-time-chart"></canvas>
+        <canvas class="chart" id="freevib-fft-chart"></canvas>
+        <div class="control-row">
+          <button id="btn-freevib-reveal" class="btn" disabled>Reveal computed f &amp; ζ</button>
+          <span id="freevib-answer" class="logsum-answer"></span>
+        </div>
+        <p class="panel-hint" id="freevib-answer-note" hidden>
+          Automated estimate: peaks are detected on the ring-down, the damped
+          period gives the frequency, and a straight-line fit of ln(peak
+          amplitude) vs. cycle number gives the logarithmic decrement δ, from
+          which ζ = δ / √(4π² + δ²) and the undamped fₙ = f_d / √(1 − ζ²). Treat
+          it as a cross-check against your own cursor reading, not ground truth —
+          a short or noisy ring-down weakens the fit.
+        </p>
+      </div>
+    </div>
+  </div>
+
+</section>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

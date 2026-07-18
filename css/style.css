@@ -1,0 +1,494 @@
+:root {
+  --bg: #0b0d0c;
+  --panel-bg: #14181a;
+  --border: #2a2f30;
+  --text: #eaeaea;
+  --text-dim: #9aa0a0;
+  --accent: #3ecf6e;
+  --accent-dim: #1c6b3a;
+  --warn: #e0c341;
+  --danger: #e05a4a;
+  --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  /* Faint accent wash from the top so the near-black background reads as lit
+     rather than dead flat -- fixed so it stays put while panels scroll. */
+  background:
+    radial-gradient(1200px 620px at 50% -12%, rgba(62, 207, 110, 0.06), transparent 70%),
+    var(--bg);
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font);
+  min-height: 100vh;
+}
+
+.screen {
+  display: none;
+  min-height: 100vh;
+  /* Crossfade between screens (display can't be transitioned, so JS toggles
+     .active for display and .visible one frame later for the opacity fade). */
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 350ms ease, transform 350ms ease;
+}
+.screen.active { display: block; }
+/* Resting state uses transform:none (not translateY(0)) so it doesn't leave a
+   containing block that would trap the fixed-position modal overlays. */
+.screen.active.visible { opacity: 1; transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .screen { transition: none; transform: none; }
+}
+
+/* ---------------- Splash ---------------- */
+/* Intro sequence (pure CSS): the FFT-waterfall logo sweeps in left-to-right
+   like a signal being drawn, with an accent glow that powers up, eases off,
+   then breathes on a slow loop; the subtitle fades up, the "Loading" line
+   fades in and back out, and finally the Continue button fades in. The splash
+   is user-dismissed (Continue button, wired in app.js) -- no auto-advance, so
+   these are timed to settle rather than to hand off on a timer. */
+#screen-splash.active {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at 50% 42%, rgba(62, 207, 110, 0.10), transparent 62%);
+}
+.splash-content { text-align: center; }
+.splash-logo {
+  max-width: 320px;
+  width: 60vw;
+  /* Draw-in, then a one-shot glow that settles, then a slow infinite "breathe"
+     so the logo stays alive while the user lingers before clicking Continue. */
+  animation:
+    splash-logo-draw 1500ms cubic-bezier(0.16, 1, 0.3, 1) both,
+    splash-logo-glow 2400ms ease-in-out 250ms both,
+    splash-logo-breathe 3.4s ease-in-out 2650ms infinite;
+}
+@keyframes splash-logo-draw {
+  0%   { opacity: 0; transform: scale(0.94); clip-path: inset(0 100% 0 0); }
+  55%  { opacity: 1; }
+  100% { opacity: 1; transform: scale(1);    clip-path: inset(0 0 0 0); }
+}
+/* Two tight drop-shadow layers so the glow traces the waveform strokes and the
+   lettering as an aura, instead of one big blur that blooms across the gaps and
+   reads as a rectangle. The logo renders small (~320x110px), so the radii are
+   deliberately small -- a bright ~3px core hugging the shape plus a soft ~7px
+   halo. Both layers are present in every keyframe so the filter interpolates. */
+@keyframes splash-logo-glow {
+  0%   { filter: drop-shadow(0 0 0 rgba(62, 207, 110, 0))
+                 drop-shadow(0 0 0 rgba(62, 207, 110, 0)); }
+  45%  { filter: drop-shadow(0 0 2px rgba(62, 207, 110, 0.8))
+                 drop-shadow(0 0 5px rgba(62, 207, 110, 0.4)); }
+  100% { filter: drop-shadow(0 0 1px rgba(62, 207, 110, 0.6))
+                 drop-shadow(0 0 3px rgba(62, 207, 110, 0.22)); }
+}
+/* Seamlessly continues from splash-logo-glow's resting state. */
+@keyframes splash-logo-breathe {
+  0%, 100% { filter: drop-shadow(0 0 1px rgba(62, 207, 110, 0.6))
+                     drop-shadow(0 0 3px rgba(62, 207, 110, 0.22)); }
+  50%      { filter: drop-shadow(0 0 2px rgba(62, 207, 110, 0.8))
+                     drop-shadow(0 0 5px rgba(62, 207, 110, 0.38)); }
+}
+.splash-subtitle {
+  color: var(--text-dim);
+  margin-top: 1rem;
+  font-size: 1.1rem;
+  opacity: 0;
+  animation: splash-fade-up 700ms ease 1150ms both;
+}
+.splash-loading {
+  color: var(--text-dim);
+  margin-top: 2rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  font-size: 0.85rem;
+  opacity: 0;
+  /* Fades in, holds, then fades out to hand off to the Continue button. */
+  animation: splash-loading-cycle 1700ms ease 1400ms both;
+}
+@keyframes splash-loading-cycle {
+  0%   { opacity: 0; transform: translateY(8px); }
+  30%  { opacity: 1; transform: translateY(0); }
+  72%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+/* Continue button: appears once the intro has settled and the loading line has
+   handed off. Until then it's invisible and unclickable (see keyframe). */
+.splash-continue {
+  margin-top: 1.5rem;
+  min-width: 12rem;
+  opacity: 0;
+  pointer-events: none;
+  animation: splash-continue-in 700ms ease 3000ms both;
+}
+@keyframes splash-continue-in {
+  from { opacity: 0; transform: translateY(10px); pointer-events: none; }
+  to   { opacity: 1; transform: translateY(0);    pointer-events: auto; }
+}
+/* Animated trailing dots so "Loading" feels alive (the HTML no longer hardcodes
+   an ellipsis). */
+.splash-loading::after {
+  content: '';
+  animation: splash-dots 1.4s steps(1, end) infinite;
+}
+@keyframes splash-fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes splash-dots {
+  0%   { content: ''; }
+  25%  { content: '.'; }
+  50%  { content: '..'; }
+  75%  { content: '...'; }
+}
+/* Respect reduced-motion: skip the movement, go straight to the resting state
+   with the Continue button available (the loading line has no role there). */
+@media (prefers-reduced-motion: reduce) {
+  .splash-logo, .splash-subtitle, .splash-continue { animation: none; opacity: 1; }
+  .splash-logo {
+    filter: drop-shadow(0 0 1px rgba(62, 207, 110, 0.6))
+            drop-shadow(0 0 3px rgba(62, 207, 110, 0.22));
+  }
+  .splash-continue { pointer-events: auto; transform: none; }
+  .splash-loading { display: none; }
+}
+
+/* ---------------- Topbar ---------------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.9rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, #1a1f21, #12161a);
+  /* faint accent underline glow so the bar reads as lit, not just bordered */
+  box-shadow: 0 1px 0 rgba(62, 207, 110, 0.14), 0 6px 18px rgba(0, 0, 0, 0.35);
+  position: relative;
+  z-index: 1;
+}
+.topbar-title {
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  font-size: 0.95rem;
+  /* subtle accent-tinted lift on the wordmark */
+  text-shadow: 0 0 18px rgba(62, 207, 110, 0.18);
+}
+.topbar-status { display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; color: var(--text-dim); }
+.mode-pill {
+  background: var(--accent-dim);
+  color: var(--text);
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+
+/* ---------------- Status screen ---------------- */
+.status-content { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; }
+.status-content h1 { font-size: 1.4rem; margin-bottom: 1.5rem; }
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 0.75rem;
+}
+.status-label { flex: 1; font-weight: 500; }
+.status-detail { color: var(--text-dim); font-size: 0.85rem; }
+.status-note { color: var(--text-dim); font-size: 0.85rem; margin: 1rem 0; }
+
+.status-dot {
+  width: 12px; height: 12px; border-radius: 50%;
+  background: #555; flex-shrink: 0;
+}
+.status-dot.ok { background: var(--accent); box-shadow: 0 0 8px rgba(62, 207, 110, 0.65); }
+.status-dot.warn { background: var(--warn); box-shadow: 0 0 8px rgba(224, 195, 65, 0.55); }
+.status-dot.fail { background: var(--danger); box-shadow: 0 0 8px rgba(224, 90, 74, 0.55); }
+.status-dot.pending { background: #555; animation: pulse 1.4s infinite; }
+
+@keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+
+/* ---------------- Buttons ---------------- */
+.btn {
+  background: #23282a;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease,
+              box-shadow 0.15s ease, transform 0.05s ease;
+}
+.btn:hover:not(:disabled) { background: #2d3234; }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary {
+  background: linear-gradient(180deg, #2c9e57, var(--accent-dim));
+  border-color: var(--accent);
+}
+.btn-primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, #34b464, #227e46);
+  box-shadow: 0 0 16px rgba(62, 207, 110, 0.35);
+}
+.btn-danger { background: linear-gradient(180deg, #6a2e24, #5a2820); border-color: var(--danger); }
+.btn-danger:hover:not(:disabled) {
+  background: linear-gradient(180deg, #813a2e, #713228);
+  box-shadow: 0 0 16px rgba(224, 90, 74, 0.3);
+}
+.btn-large { width: 100%; padding: 0.9rem; font-size: 1rem; margin: 1rem 0; }
+.toggle-btn.on { background: var(--accent-dim); border-color: var(--accent); }
+
+/* Sweep "Auto Mode" state: the RPM/Accel Start buttons become a read-only
+   indicator while a sweep drives the motor. Amber, and kept fully opaque so
+   the label stays legible despite the button being disabled. */
+.btn.auto-mode, .btn.auto-mode:disabled {
+  background: var(--warn); border-color: var(--warn); color: #1a1a12;
+  opacity: 1; cursor: default; font-weight: 600;
+}
+
+/* ---------------- Log panel ---------------- */
+.log-panel {
+  margin-top: 1.5rem;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.log-panel-title {
+  padding: 0.4rem 0.75rem;
+  background: var(--panel-bg);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.log-panel-header {
+  display: flex; align-items: center; justify-content: space-between;
+  background: var(--panel-bg); padding-right: 0.5rem;
+}
+.log-panel-header .log-panel-title { background: none; padding-right: 0; }
+.log-tools { display: flex; align-items: center; gap: 0.5rem; }
+.log-tool-check {
+  font-size: 0.72rem; color: var(--text-dim); display: flex; align-items: center; gap: 0.25rem;
+}
+.btn-tiny { padding: 0.2rem 0.55rem; font-size: 0.72rem; }
+.log-output {
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 0.78rem;
+  color: #7fd996;
+  padding: 0.6rem 0.75rem;
+  height: 160px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ---------------- Dashboard ---------------- */
+/* Persistent grid, not click-to-switch tabs -- Motor and Accel need to stay
+   visible side by side so the RPM/vibration relationship (e.g. the
+   amplitude spike near resonance) reads directly off two live charts at
+   once, not by memory across a tab switch. Device/Motor/Accel fill row 1
+   (3 DOM items, 3 columns -- exact fit); Stroboscope/Auxiliary wrap to
+   row 2, leaving room for future panels there. */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  padding: 1.25rem;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+@media (max-width: 1100px) {
+  .dashboard-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 700px) {
+  .dashboard-grid { grid-template-columns: 1fr; }
+}
+
+.app-footer {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  padding: 0.5rem 1rem 1rem;
+  letter-spacing: 0.03em;
+}
+
+.panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.1rem 1.25rem;
+  /* Grid row stretch can make a panel taller than its own content needs
+     (Device/Accel next to Motor's taller two-chart layout) -- flex column
+     + .chart's flex:1 (below) lets a panel with one chart grow it to fill
+     that leftover height instead of leaving it as dead space. Device has
+     no chart, so it just keeps some blank space below its (deliberately
+     compact) image/status content -- expected for a small reference panel. */
+  display: flex;
+  flex-direction: column;
+  /* Gentle elevation so panels sit above the background instead of being flat
+     fills; hover lifts them a touch with an accent-tinted edge. */
+  background: linear-gradient(180deg, #171c1e, #12171a);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset, 0 10px 26px rgba(0, 0, 0, 0.35);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+.panel:hover {
+  border-color: var(--accent-dim);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(62, 207, 110, 0.12);
+  transform: translateY(-2px);
+}
+/* Accent tick beside each panel heading for a bit of hierarchy/color. */
+.panel h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+  position: relative;
+  padding-left: 0.7rem;
+}
+.panel h2::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0.15em; bottom: 0.15em;
+  width: 3px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-dim));
+  box-shadow: 0 0 8px rgba(62, 207, 110, 0.4);
+}
+.panel-hint { color: var(--text-dim); font-size: 0.8rem; margin: 0 0 0.75rem; }
+.panel-status { color: var(--text-dim); font-size: 0.85rem; min-height: 1.2em; }
+
+.metric-row { display: flex; gap: 1.5rem; margin-bottom: 0.75rem; }
+.metric { display: flex; flex-direction: column; }
+.metric-value { font-size: 1.6rem; font-weight: 600; color: var(--accent); text-shadow: 0 0 18px rgba(62, 207, 110, 0.28); }
+.metric-label { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+
+.chart {
+  width: 100%; height: 190px; min-height: 190px; flex: 1 1 auto;
+  background: #0a0c0b; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 0.9rem;
+}
+
+.control-row { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.6rem; }
+.control-row label { color: var(--text-dim); font-size: 0.85rem; min-width: 4.5rem; }
+.control-row label.check-inline {
+  min-width: 0; display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer;
+}
+.control-row label.check-inline input { margin: 0; }
+.control-row input[type="number"] {
+  width: 5rem; background: #0a0c0b; border: 1px solid var(--border); color: var(--text);
+  border-radius: 4px; padding: 0.35rem 0.5rem;
+}
+.control-row input[type="range"] { flex: 1; }
+
+/* ---------------- Device / apparatus panel ---------------- */
+.apparatus-images { display: flex; justify-content: center; margin-bottom: 1.25rem; }
+.apparatus-images figure { margin: 0; text-align: center; max-width: 420px; width: 100%; }
+.apparatus-images img { width: 100%; height: auto; display: block; }
+.apparatus-images figcaption {
+  color: var(--text-dim); font-size: 0.75rem; margin-top: 0.4rem;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+
+.device-status { display: flex; flex-direction: column; gap: 0.6rem; }
+
+/* ---------------- Modals (Sweep/Bode, Bump Test) ---------------- */
+.modal-overlay {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: 100;
+  align-items: center; justify-content: center;
+  padding: 2rem 1.25rem;
+}
+.modal-overlay.active { display: flex; }
+.modal {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  max-width: 1100px; width: 100%;
+  max-height: 90vh;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 1rem 1.25rem; border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.modal-header h2 { margin: 0; font-size: 1.1rem; }
+.modal-close {
+  background: none; border: none; color: var(--text-dim);
+  font-size: 1.6rem; line-height: 1; cursor: pointer; padding: 0 0.25rem;
+}
+.modal-close:hover { color: var(--text); }
+.modal-body { padding: 1.1rem 1.25rem; overflow-y: auto; }
+
+/* A second-layer overlay (e.g. the damper reminder) that must sit above an
+   already-open modal rather than behind it. */
+.modal-overlay-top { z-index: 200; }
+.modal-narrow { max-width: 560px; }
+
+/* ---- Damping-case segmented control (Sweep modal) ---- */
+.control-row .control-label {
+  color: var(--text-dim); font-size: 0.85rem; min-width: 4.5rem;
+}
+.segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.seg-btn {
+  background: var(--panel-bg); color: var(--text-dim);
+  border: none; border-left: 1px solid var(--border);
+  padding: 0.4rem 0.85rem; font: inherit; font-size: 0.85rem; cursor: pointer;
+}
+.seg-btn:first-child { border-left: none; }
+.seg-btn:hover:not(:disabled) { background: #2d3234; color: var(--text); }
+.seg-btn.active { background: var(--accent); color: #06210f; font-weight: 600; }
+.seg-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ---- Damper-attach reminder images ---- */
+.damper-images {
+  display: flex; align-items: center; justify-content: center; gap: 0.75rem;
+  margin: 0.25rem 0 1rem;
+}
+.damper-images figure { margin: 0; text-align: center; flex: 1 1 0; max-width: 220px; }
+.damper-images img {
+  width: 100%; height: auto; display: block;
+  border: 1px solid var(--border); border-radius: 8px; background: #0c0f10;
+}
+.damper-images figcaption {
+  color: var(--text-dim); font-size: 0.72rem; margin-top: 0.35rem;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.damper-arrow { color: var(--text-dim); font-size: 1.6rem; flex: 0 0 auto; }
+.damper-actions { margin-bottom: 0; }
+
+.chart-large { height: 420px; }
+/* Phase plot sits under the amplitude Bode plot sharing its RPM x-axis.
+   Deliberately shorter: its y-range is a fixed 0-180, so it needs far less
+   vertical room than the amplitude trace, and keeping it compact means both
+   plots stay on screen together (the point is reading them against each
+   other -- amplitude peak vs the 90 deg phase crossing). */
+.chart-phase { height: 240px; min-height: 240px; flex: none; }
+
+/* Log Summary's revealed answer -- deliberately styled like a metric value, so
+   it reads as a measurement to check against rather than UI chrome. */
+.logsum-answer {
+  font-size: 1.05rem; font-weight: 600; color: var(--accent);
+  text-shadow: 0 0 18px rgba(62, 207, 110, 0.28);
+}
+/* The raw accel-peak value: provenance for the number above, not the answer
+   being checked -- so it's deliberately quieter. */
+.logsum-answer-raw { font-size: 0.8rem; color: var(--text-dim); }
+#sweep-chart, #sweep-phase-chart, #bump-time-chart, #bump-fft-chart { cursor: crosshair; }
+
+.file-btn {
+  display: inline-block;
+  background: #23282a; color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.5rem 1rem; font-size: 0.9rem; cursor: pointer;
+}
+.file-btn:hover { background: #2d3234; }

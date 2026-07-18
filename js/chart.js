@@ -1,0 +1,518 @@
+// Dependency-free rolling strip chart for a canvas element, styled after
+// this project's own offline MATLAB plots (PlotClosedLoopLog.m /
+// PlotVibrationLog.m): an axis box with numeric tick labels on both axes,
+// axis titles, an optional chart title, and a legend -- not just a bare
+// line trace. Not a general charting library, just enough for the live
+// dashboard panels.
+
+export const COLOR_AXIS  = '#5a6062';
+export const COLOR_GRID  = 'rgba(255,255,255,0.08)';
+export const COLOR_TEXT  = '#9aa0a0';
+export const COLOR_TITLE = '#eaeaea';
+
+export class RollingChart {
+  constructor(canvas, {
+    title = '',
+    xLabel = 'Time (s)',
+    yLabel = '',
+    series = [{ label: '', color: '#3ecf6e' }],
+    maxPoints = 400,
+    yMin, yMax,
+    autoScaleY = true,
+    windowSeconds,
+    // push()'s first argument is divided by this to get plotted x units --
+    // 1000 (default) treats it as milliseconds, like device time_ms or a
+    // demo elapsed-ms counter. Pass 1 to plot already-in-natural-units
+    // values directly (e.g. frequency in Hz for an FFT chart).
+    xScale = 1000,
+  } = {}) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.title = title;
+    this.xLabel = xLabel;
+    this.yLabel = yLabel;
+    this.series = series;
+    this.maxPoints = maxPoints;
+    this.yMin = yMin;
+    this.yMax = yMax;
+    this.autoScaleY = autoScaleY;
+    this.xScale = xScale;
+    // Fixed-width sliding window (like an oscilloscope's roll mode): once
+    // full, push() evicts samples older than windowSeconds behind the
+    // latest one, so the visible span continuously creeps forward one
+    // sample at a time instead of autoscaling to whatever's buffered.
+    this.windowSeconds = windowSeconds;
+    this.t = [];
+    this.data = series.map(() => []);
+    // Optional FFT/spectrum-style peak markers -- see setPeaks().
+    this.peaks = [];
+    // MATLAB-style data cursor (mirrors BodeChart's): nearest point under
+    // the mouse, or null. _layout holds the last draw()'s pixel<->data
+    // mapping so mousemove (outside draw()) can hit-test without
+    // recomputing the axis domain from scratch.
+    this._hover = null;
+    this._layout = null;
+    // Mouse-wheel zoom (MATLAB-style): null means auto-fit (the rolling
+    // window / autoscale behavior above), like today; scrolling over the
+    // plot area sets an explicit {min,max} window that overrides it until
+    // resetZoom() (double-click). Note this "wins" over windowSeconds'
+    // auto-scroll too -- on a continuously-live chart, zooming pins the
+    // view to a fixed span while new samples keep streaming in behind it,
+    // same tradeoff as zooming a live oscilloscope trace.
+    this._zoomX = null;
+    this._zoomY = null;
+    // Left-mouse drag-to-pan (mirrors BodeChart's): null when not dragging.
+    // Grabs whatever data point is under the mouse at mousedown and keeps
+    // it under the mouse as it moves.
+    this._pan = null;
+    this.canvas.addEventListener('mousemove', (e) => this._onMouseMove(e));
+    this.canvas.addEventListener('mouseleave', () => { this._hover = null; this.draw(); });
+    this.canvas.addEventListener('wheel', (e) => this._onWheel(e), { passive: false });
+    this.canvas.addEventListener('dblclick', () => this.resetZoom());
+    this.canvas.addEventListener('mousedown', (e) => this._onDragStart(e));
+    window.addEventListener('mousemove', (e) => this._onDragMove(e));
+    window.addEventListener('mouseup', () => this._onDragEnd());
+    this._resize();
+    window.addEventListener('resize', () => this._resize());
+  }
+
+  // Public: set/replace FFT peak markers, e.g. [{x: freqHz, y: amplitude}, ...]
+  // from fft.js's findPeaks(). Pass [] to clear.
+  setPeaks(peaks) {
+    this.peaks = peaks || [];
+    this.draw();
+  }
+
+  // Public: clear any wheel-zoom, back to auto-fit/auto-scroll.
+  resetZoom() {
+    if (!this._zoomX && !this._zoomY) return;
+    this._zoomX = null;
+    this._zoomY = null;
+    this.draw();
+  }
+
+  _onWheel(e) {
+    if (!this._layout) return;
+    const { x0, y0, plotW, plotH, tMin, tSpan, yMin, yMax } = this._layout;
+    const rect = this.canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    if (mx < x0 || mx > x0 + plotW || my < y0 || my > y0 + plotH) return;
+    e.preventDefault();
+
+    const dataX = tMin + ((mx - x0) / plotW) * tSpan;
+    const dataY = yMax - ((my - y0) / plotH) * (yMax - yMin);
+    const factor = e.deltaY < 0 ? 0.85 : 1 / 0.85; // scroll up/away = zoom in
+    const xFrac = (dataX - tMin) / tSpan;
+    const yFrac = (dataY - yMin) / (yMax - yMin);
+    const newXSpan = tSpan * factor;
+    const newYSpan = (yMax - yMin) * factor;
+
+    this._zoomX = { min: dataX - newXSpan * xFrac, max: dataX + newXSpan * (1 - xFrac) };
+    this._zoomY = { min: dataY - newYSpan * yFrac, max: dataY + newYSpan * (1 - yFrac) };
+    this.draw();
+  }
+
+  _onDragStart(e) {
+    if (e.button !== 0 || !this._layout) return;
+    const { x0, y0, plotW, plotH, tMin, tSpan, yMin, yMax } = this._layout;
+    const rect = this.canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    if (mx < x0 || mx > x0 + plotW || my < y0 || my > y0 + plotH) return;
+    e.preventDefault();
+    this._pan = {
+      startClientX: e.clientX, startClientY: e.clientY,
+      startTMin: tMin, startTSpan: tSpan, startYMin: yMin, startYMax: yMax,
+      moved: false, // stays false for a plain click (no movement), so it doesn't pin auto-fit/auto-scroll
+    };
+  }
+
+  _onDragMove(e) {
+    if (!this._pan || !this._layout) return;
+    const dxPixels = e.clientX - this._pan.startClientX;
+    const dyPixels = e.clientY - this._pan.startClientY;
+    if (!this._pan.moved && Math.hypot(dxPixels, dyPixels) < 3) return;
+    this._pan.moved = true;
+    this._hover = null; // suppress the data cursor while panning
+    const { plotW, plotH } = this._layout;
+    const { startTMin, startTSpan, startYMin, startYMax } = this._pan;
+    const ySpan = startYMax - startYMin;
+    const newTMin = startTMin - (startTSpan * dxPixels) / plotW;
+    const dy = (ySpan * dyPixels) / plotH;
+    this._zoomX = { min: newTMin, max: newTMin + startTSpan };
+    this._zoomY = { min: startYMin + dy, max: startYMax + dy };
+    this.canvas.style.cursor = 'grabbing';
+    this.draw();
+  }
+
+  _onDragEnd() {
+    if (!this._pan) return;
+    this._pan = null;
+    this.canvas.style.cursor = '';
+  }
+
+  _onMouseMove(e) {
+    if (this._pan) return; // drag handling owns mousemove while active
+    if (!this._layout || !this.t.length) return;
+    const { x0, y0, plotW, plotH, tMin, tSpan, yMin, yMax } = this._layout;
+    const rect = this.canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    // Binary search this.t (always time/frequency-ascending) for the
+    // sample nearest the mouse's x position, instead of scanning every
+    // point -- matters for the bump test's up-to-40000-sample captures.
+    const targetT = tMin + ((mx - x0) / plotW) * tSpan;
+    let lo = 0, hi = this.t.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.t[mid] < targetT) lo = mid + 1; else hi = mid;
+    }
+    let idx = lo;
+    if (lo > 0 && Math.abs(this.t[lo - 1] - targetT) < Math.abs(this.t[lo] - targetT)) idx = lo - 1;
+
+    // Multi-series charts (e.g. RPM's Target/Measured) share one t[] --
+    // pick whichever series is pixel-closest to the mouse's y at that index.
+    let best = null, bestDist = Infinity;
+    this.data.forEach((s, i) => {
+      const v = s[idx];
+      if (!Number.isFinite(v)) return;
+      const px = x0 + ((this.t[idx] - tMin) / tSpan) * plotW;
+      const py = y0 + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+      const d = Math.hypot(px - mx, py - my);
+      if (d < bestDist) {
+        bestDist = d;
+        best = { px, py, dataX: this.t[idx], dataY: v, color: this.series[i].color, label: this.series[i].label };
+      }
+    });
+
+    const HIT_RADIUS_PX = 20;
+    const next = best && bestDist <= HIT_RADIUS_PX ? best : null;
+    const prev = this._hover;
+    const unchanged = (!next && !prev) ||
+      (next && prev && next.dataX === prev.dataX && next.dataY === prev.dataY && next.label === prev.label);
+    if (unchanged) return;
+    this._hover = next;
+    this.draw();
+  }
+
+  // Public: call after the canvas becomes visible (e.g. leaving a
+  // display:none screen) -- getBoundingClientRect() reports 0x0 while
+  // hidden, so a chart built off-screen needs re-measuring here.
+  resize() { this._resize(); }
+
+  _resize() {
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    const dpr = window.devicePixelRatio || 1;
+    this.canvas.width = rect.width * dpr;
+    this.canvas.height = rect.height * dpr;
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.w = rect.width;
+    this.h = rect.height;
+    this.draw();
+  }
+
+  // x: the sample's own x-value (device time_ms by default -- see xScale --
+  // or already-natural-units like Hz when xScale:1) -- plotted like
+  // MATLAB's plot(t, y), rather than assuming uniform sample spacing.
+  push(x, ...values) {
+    const tS = x / this.xScale;
+    this.t.push(tS);
+    values.forEach((v, i) => this.data[i].push(v));
+
+    if (this.windowSeconds) {
+      // Continuously-sliding fixed-width window (like an oscilloscope's
+      // roll mode): evict samples older than windowSeconds behind the
+      // latest one every push, instead of a scrolling-then-reset sweep --
+      // the lower bound creeps forward one sample at a time (e.g. at
+      // t=3.5s it's 0.5s) rather than jumping back to 0 every 3s.
+      while (this.t.length > 1 && tS - this.t[0] > this.windowSeconds) {
+        this.t.shift();
+        this.data.forEach((s) => s.shift());
+      }
+    } else if (this.t.length > this.maxPoints) {
+      this.t.shift();
+      this.data.forEach((s) => s.shift());
+    }
+    if (!this._deferDraw) this.draw();
+  }
+
+  // Batch mode: while active, push() accumulates points WITHOUT redrawing.
+  // A full canvas redraw per push is fine for live streams (a few points per
+  // frame) but catastrophic for bulk loads -- the bump dump pushes ~11k rows,
+  // and 11k synchronous redraws block the main thread long enough to stall the
+  // serial read loop and make the board drop data. beginBatch()/endBatch()
+  // wrap such loads so the chart draws once at the end. (Calling draw()
+  // directly still works mid-batch, e.g. for a throttled live preview.)
+  beginBatch() { this._deferDraw = true; }
+  endBatch() { this._deferDraw = false; this.draw(); }
+
+  clear() {
+    this.t = [];
+    this.data = this.series.map(() => []);
+    this.peaks = [];
+    this._hover = null;
+    this._zoomX = null;
+    this._zoomY = null;
+    this._deferDraw = false; // never leave a cleared chart stuck in batch mode
+    this.draw();
+  }
+
+  draw() {
+    const { ctx, w, h } = this;
+    if (!w || !h) return;
+    ctx.clearRect(0, 0, w, h);
+    ctx.textBaseline = 'middle';
+
+    const padTop = this.title ? 28 : 16;
+    const padBottom = 30;
+    const padLeft = 44;
+    const padRight = 10;
+    const plotW = Math.max(1, w - padLeft - padRight);
+    const plotH = Math.max(1, h - padTop - padBottom);
+    const x0 = padLeft, y0 = padTop;
+
+    if (this.title) {
+      ctx.font = '600 12px Segoe UI, sans-serif';
+      ctx.fillStyle = COLOR_TITLE;
+      ctx.textAlign = 'left';
+      ctx.fillText(this.title, x0, 11);
+    }
+
+    ctx.font = '11px Segoe UI, sans-serif';
+    const labeled = this.series.filter((s) => s.label);
+    if (labeled.length) {
+      const widths = labeled.map((s) => ctx.measureText(s.label).width + 16);
+      let sx = x0 + plotW - widths.reduce((a, b) => a + b, 0);
+      ctx.textAlign = 'left';
+      labeled.forEach((s, i) => {
+        ctx.fillStyle = s.color;
+        ctx.fillRect(sx, 6, 9, 9);
+        ctx.fillStyle = COLOR_TEXT;
+        ctx.fillText(s.label, sx + 13, 11);
+        sx += widths[i];
+      });
+    }
+
+    // ---- Y domain + ticks ----
+    // Wheel-zoom (_onWheel) overrides autoscale/fixed-yMin-yMax alike with
+    // a user-picked window; resetZoom() (double-click) clears it back.
+    let yMin, yMax, yTicks;
+    if (this._zoomY) {
+      yMin = this._zoomY.min; yMax = this._zoomY.max;
+      yTicks = niceTicks(yMin, yMax, 5).ticks.filter((v) => v >= yMin && v <= yMax);
+    } else {
+      yMin = this.yMin; yMax = this.yMax;
+      if (this.autoScaleY || yMin === undefined || yMax === undefined) {
+        const all = this.data.flat().filter(Number.isFinite);
+        const dataMin = all.length ? Math.min(...all) : 0;
+        const dataMax = all.length ? Math.max(...all) : 1;
+        const nice = niceTicks(dataMin, dataMax, 5);
+        yMin = nice.min; yMax = nice.max; yTicks = nice.ticks;
+      } else {
+        yTicks = niceTicks(yMin, yMax, 5).ticks.filter((v) => v >= yMin && v <= yMax);
+      }
+    }
+    if (yMax === yMin) yMax = yMin + 1;
+
+    // push() already trims to the last windowSeconds when set, so the
+    // buffered range itself is the visible span -- no separate fixed
+    // domain needed here, unless wheel-zoomed (see _onWheel/resetZoom).
+    let tMin, tMax;
+    if (this._zoomX) {
+      tMin = this._zoomX.min; tMax = this._zoomX.max;
+    } else {
+      tMin = this.t.length ? this.t[0] : 0;
+      tMax = this.t.length ? this.t[this.t.length - 1] : 1;
+    }
+    const tSpan = (tMax - tMin) || 1;
+
+    // Cached for _onMouseMove's hit-testing (data cursor) -- draw() is the
+    // only place that (re)computes the axis domain.
+    this._layout = { x0, y0, plotW, plotH, tMin, tSpan, yMin, yMax };
+
+    // ---- Gridlines + y tick labels ----
+    ctx.lineWidth = 1;
+    ctx.textAlign = 'right';
+    yTicks.forEach((v) => {
+      const y = y0 + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+      ctx.strokeStyle = COLOR_GRID;
+      ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x0 + plotW, y); ctx.stroke();
+      ctx.fillStyle = COLOR_TEXT;
+      ctx.fillText(formatTick(v), x0 - 6, y);
+    });
+
+    // ---- X ticks + labels (evenly spaced across the visible window) ----
+    // Decimal places scale with the visible span so a wheel-zoomed-in view
+    // (tSpan can get arbitrarily small) doesn't render duplicate-looking
+    // tick labels rounded to the same one decimal place.
+    const xTickCount = 5;
+    const xDecimals = tSpan < 0.01 ? 4 : tSpan < 1 ? 3 : tSpan < 10 ? 2 : 1;
+    ctx.textAlign = 'center';
+    for (let i = 0; i <= xTickCount; i++) {
+      const tv = tMin + (tSpan * i) / xTickCount;
+      const x = x0 + (plotW * i) / xTickCount;
+      ctx.strokeStyle = COLOR_GRID;
+      ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y0 + plotH); ctx.stroke();
+      ctx.fillStyle = COLOR_TEXT;
+      ctx.fillText(tv.toFixed(xDecimals), x, y0 + plotH + 12);
+    }
+
+    // ---- Axis box ----
+    ctx.strokeStyle = COLOR_AXIS;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x0, y0); ctx.lineTo(x0, y0 + plotH); ctx.lineTo(x0 + plotW, y0 + plotH);
+    ctx.stroke();
+
+    // ---- Axis titles ----
+    ctx.fillStyle = COLOR_TEXT;
+    ctx.textAlign = 'center';
+    ctx.fillText(this.xLabel, x0 + plotW / 2, y0 + plotH + 24);
+    if (this.yLabel) {
+      ctx.save();
+      ctx.translate(11, y0 + plotH / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText(this.yLabel, 0, 0);
+      ctx.restore();
+    }
+
+    // ---- Series traces ----
+    if (this.t.length >= 2) {
+      this.data.forEach((s, i) => {
+        ctx.strokeStyle = this.series[i].color;
+        ctx.lineWidth = 1.75;
+        ctx.beginPath();
+        for (let idx = 0; idx < s.length; idx++) {
+          const x = x0 + ((this.t[idx] - tMin) / tSpan) * plotW;
+          const y = y0 + plotH - ((s[idx] - yMin) / (yMax - yMin)) * plotH;
+          idx === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      });
+    }
+
+    // ---- Peak markers (e.g. FFT peaks from fft.js's findPeaks()) ----
+    if (this.peaks.length) {
+      ctx.save();
+      ctx.font = '600 10px Segoe UI, sans-serif';
+      ctx.textAlign = 'center';
+      this.peaks.forEach((p) => {
+        if (p.x < tMin || p.x > tMin + tSpan) return;
+        const px = x0 + ((p.x - tMin) / tSpan) * plotW;
+        const py = y0 + plotH - ((p.y - yMin) / (yMax - yMin)) * plotH;
+        ctx.fillStyle = '#e0c341';
+        ctx.beginPath();
+        ctx.moveTo(px, py - 8);
+        ctx.lineTo(px - 4, py - 1);
+        ctx.lineTo(px + 4, py - 1);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillText(`${formatTick(p.x)} Hz`, px, Math.max(py - 13, y0 + 9));
+      });
+      ctx.restore();
+    }
+
+    // ---- MATLAB-style data cursor: crosshair + highlighted point + value
+    // box for whatever point _onMouseMove last snapped to ----
+    if (this._hover) {
+      const { px, py, dataX, dataY, color, label } = this._hover;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(x0, py); ctx.lineTo(x0 + plotW, py); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(px, y0); ctx.lineTo(px, y0 + plotH); ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.beginPath();
+      ctx.arc(px, py, 4.5, 0, 2 * Math.PI);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#fff';
+      ctx.stroke();
+
+      // Span-scaled cursor precision (see formatCursor) -- axis-tick rounding
+      // is too coarse for reading peak spacings off a zoomed-in trace.
+      const line1 = `${this.xLabel}: ${formatCursor(dataX, tSpan)}`;
+      const line2 = `${label || this.yLabel}: ${formatCursor(dataY, yMax - yMin)}`;
+      ctx.font = '11px Segoe UI, sans-serif';
+      const boxW = Math.max(ctx.measureText(line1).width, ctx.measureText(line2).width) + 14;
+      const boxH = 36;
+      let bx = px + 10, by = py - boxH - 8;
+      if (bx + boxW > x0 + plotW) bx = px - boxW - 10;
+      if (by < y0) by = py + 10;
+
+      ctx.fillStyle = 'rgba(20,24,26,0.95)';
+      ctx.strokeStyle = COLOR_AXIS;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.rect(bx, by, boxW, boxH);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = COLOR_TITLE;
+      ctx.textAlign = 'left';
+      ctx.fillText(line1, bx + 7, by + 12);
+      ctx.fillText(line2, bx + 7, by + 26);
+      ctx.restore();
+    }
+  }
+}
+
+export function formatTick(v) {
+  if (Math.abs(v) >= 1000) return v.toFixed(0);
+  if (Math.abs(v) >= 10) return v.toFixed(1);
+  return v.toFixed(2);
+}
+
+// Like formatTick, but for the DATA CURSOR, where the whole point is reading an
+// exact value -- formatTick's axis-label precision (2 decimals under 10) turns
+// t=2.5041 s into "2.51", which is useless when you're measuring a pulse-to-peak
+// gap of a few ms.
+//
+// Precision is derived from the currently VISIBLE span rather than fixed, so it
+// adapts to whatever the axis actually holds (seconds, RPM, degrees, g) AND
+// sharpens automatically as you wheel-zoom in -- ~4 significant digits across
+// the visible range, capped at 6 decimals so it never turns into float noise.
+export function formatCursor(v, span) {
+  if (!isFinite(v)) return '—';
+  const s = Math.abs(span) > 0 ? Math.abs(span) : Math.abs(v) || 1;
+  const decimals = Math.min(6, Math.max(0, Math.ceil(-Math.log10(s)) + 4));
+  return v.toFixed(decimals);
+}
+
+// "Nice number" tick algorithm (Heckbert) -- picks human-friendly axis
+// bounds/step (1/2/5 x 10^n) instead of scaling exactly to the data's
+// raw min/max, same as MATLAB's default axis autoscaling.
+function niceNum(range, round) {
+  if (range === 0) return 1;
+  const exponent = Math.floor(Math.log10(range));
+  const fraction = range / Math.pow(10, exponent);
+  let niceFraction;
+  if (round) {
+    if (fraction < 1.5) niceFraction = 1;
+    else if (fraction < 3) niceFraction = 2;
+    else if (fraction < 7) niceFraction = 5;
+    else niceFraction = 10;
+  } else {
+    if (fraction <= 1) niceFraction = 1;
+    else if (fraction <= 2) niceFraction = 2;
+    else if (fraction <= 5) niceFraction = 5;
+    else niceFraction = 10;
+  }
+  return niceFraction * Math.pow(10, exponent);
+}
+
+export function niceTicks(min, max, maxTicks = 5) {
+  if (min === max) { min -= 1; max += 1; }
+  const range = niceNum(max - min, false);
+  const step = niceNum(range / (maxTicks - 1), true);
+  const niceMin = Math.floor(min / step) * step;
+  const niceMax = Math.ceil(max / step) * step;
+  const ticks = [];
+  for (let v = niceMin; v <= niceMax + step * 0.5; v += step) ticks.push(Math.round(v * 1e6) / 1e6);
+  return { ticks, min: niceMin, max: niceMax };
+}
