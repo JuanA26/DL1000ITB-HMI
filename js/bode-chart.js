@@ -5,7 +5,11 @@
 // x-axis is RPM and multiple *named* series (the live run plus however
 // many saved runs are loaded for overlay comparison) need to coexist and
 // be individually added/removed without disturbing the others.
-import { COLOR_AXIS, COLOR_GRID, COLOR_TEXT, COLOR_TITLE, niceTicks, formatTick, formatCursor } from './chart.js';
+import {
+  COLOR_AXIS, COLOR_GRID, COLOR_TEXT, COLOR_TITLE,
+  COLOR_MARK, COLOR_MARK_DIM, COLOR_CURSOR, COLOR_CURSOR_OUTLINE, COLOR_TOOLTIP_BG,
+  themedColor, chartRegistry, niceTicks, formatTick, formatCursor,
+} from './chart.js';
 
 export class BodeChart {
   constructor(canvas, {
@@ -58,6 +62,7 @@ export class BodeChart {
     this.canvas.addEventListener('mousedown', (e) => this._onDragStart(e));
     window.addEventListener('mousemove', (e) => this._onDragMove(e));
     window.addEventListener('mouseup', () => this._onDragEnd());
+    chartRegistry.add(this);
     this._resize();
     window.addEventListener('resize', () => this._resize());
   }
@@ -263,7 +268,7 @@ export class BodeChart {
       let sx = x0 + plotW - widths.reduce((a, b) => a + b, 0);
       ctx.textAlign = 'left';
       labeled.forEach((s, i) => {
-        ctx.fillStyle = s.color;
+        ctx.fillStyle = themedColor(s.color);
         ctx.fillRect(sx, 6, 9, 9);
         ctx.fillStyle = COLOR_TEXT;
         ctx.fillText(s.label, sx + 13, 11);
@@ -351,7 +356,7 @@ export class BodeChart {
     if (this.resonanceX != null && isFinite(this.resonanceX) && this.resonanceX >= xMin && this.resonanceX <= xMax) {
       const rx = x0 + ((this.resonanceX - xMin) / (xMax - xMin)) * plotW;
       ctx.save();
-      ctx.strokeStyle = '#e0c341';
+      ctx.strokeStyle = COLOR_MARK;
       ctx.lineWidth = 1.25;
       ctx.setLineDash([5, 4]);
       ctx.beginPath();
@@ -359,7 +364,7 @@ export class BodeChart {
       ctx.lineTo(rx, y0 + plotH);
       ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle = '#e0c341';
+      ctx.fillStyle = COLOR_MARK;
       ctx.font = '10px Segoe UI, sans-serif';
       ctx.textAlign = 'left';
       ctx.fillText(`${formatTick(this.resonanceX)} RPM`, rx + 3, y0 + 9);
@@ -370,7 +375,7 @@ export class BodeChart {
     // Drawn under the trace so the waveform stays readable on top of them.
     if (this.vLines.length) {
       ctx.save();
-      ctx.strokeStyle = 'rgba(224, 195, 65, 0.55)';
+      ctx.strokeStyle = COLOR_MARK_DIM;
       ctx.lineWidth = 1;
       ctx.beginPath();
       for (const vx of this.vLines) {
@@ -390,7 +395,7 @@ export class BodeChart {
     if (this.refY != null && isFinite(this.refY) && this.refY >= yMin && this.refY <= yMax) {
       const ry = y0 + plotH - ((this.refY - yMin) / (yMax - yMin)) * plotH;
       ctx.save();
-      ctx.strokeStyle = '#e0c341';
+      ctx.strokeStyle = COLOR_MARK;
       ctx.lineWidth = 1.25;
       ctx.setLineDash([5, 4]);
       ctx.beginPath();
@@ -416,7 +421,7 @@ export class BodeChart {
       ];
       if (s.points.length >= 2) {
         const sorted = s.points.slice().sort((a, b) => a.x - b.x);
-        ctx.strokeStyle = s.color;
+        ctx.strokeStyle = themedColor(s.color);
         ctx.lineWidth = 1.75;
         ctx.beginPath();
         sorted.forEach((p, i) => {
@@ -437,7 +442,7 @@ export class BodeChart {
         const [x, y] = toXY(p);
         ctx.save();
         if (p.dim) ctx.globalAlpha = 0.28;
-        ctx.fillStyle = s.color;
+        ctx.fillStyle = themedColor(s.color);
         ctx.beginPath();
         ctx.arc(x, y, 2.25, 0, 2 * Math.PI);
         ctx.fill();
@@ -450,7 +455,7 @@ export class BodeChart {
     if (this._hover) {
       const { px, py, dataX, dataY, color } = this._hover;
       ctx.save();
-      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.strokeStyle = COLOR_CURSOR;
       ctx.lineWidth = 1;
       ctx.setLineDash([3, 3]);
       ctx.beginPath(); ctx.moveTo(x0, py); ctx.lineTo(x0 + plotW, py); ctx.stroke();
@@ -459,10 +464,10 @@ export class BodeChart {
 
       ctx.beginPath();
       ctx.arc(px, py, 4.5, 0, 2 * Math.PI);
-      ctx.fillStyle = color;
+      ctx.fillStyle = themedColor(color);
       ctx.fill();
       ctx.lineWidth = 1.5;
-      ctx.strokeStyle = '#fff';
+      ctx.strokeStyle = COLOR_CURSOR_OUTLINE;
       ctx.stroke();
 
       // Full-precision readout, scaled to the visible span (see formatCursor) --
@@ -477,7 +482,7 @@ export class BodeChart {
       if (bx + boxW > x0 + plotW) bx = px - boxW - 10;
       if (by < y0) by = py + 10;
 
-      ctx.fillStyle = 'rgba(20,24,26,0.95)';
+      ctx.fillStyle = COLOR_TOOLTIP_BG;
       ctx.strokeStyle = COLOR_AXIS;
       ctx.lineWidth = 1;
       ctx.beginPath();

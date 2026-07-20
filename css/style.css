@@ -9,6 +9,46 @@
   --warn: #e0c341;
   --danger: #e05a4a;
   --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  /* Themed surfaces (overridden by body.light below). The canvas charts can't
+     read CSS variables -- their palette lives in js/chart.js (setChartTheme),
+     which app.js flips in step with the body.light class. */
+  --bg-wash: rgba(62, 207, 110, 0.06);
+  --topbar-grad-a: #1a1f21;
+  --topbar-grad-b: #12161a;
+  --panel-grad-a: #171c1e;
+  --panel-grad-b: #12171a;
+  --btn-bg: #23282a;
+  --btn-hover: #2d3234;
+  --chart-bg: #0a0c0b;
+  --input-bg: #0a0c0b;
+  --glow-accent: rgba(62, 207, 110, 0.28);
+}
+
+/* ---------------- Light mode ----------------
+   Toggled by the sun/moon button in the topbars (app.js adds/removes
+   body.light and swaps the canvas-chart palette to match; the choice is
+   persisted in localStorage). The Serial Log panels deliberately stay dark
+   in both themes -- a console reads as a console. */
+body.light {
+  --bg: #eef1ef;
+  --panel-bg: #ffffff;
+  --border: #c9d0cd;
+  --text: #1c2124;
+  --text-dim: #5a6468;
+  --accent: #178f47;
+  --accent-dim: #bfe6cd;
+  --warn: #9c7c14;
+  --danger: #c8402f;
+  --bg-wash: rgba(23, 143, 71, 0.05);
+  --topbar-grad-a: #ffffff;
+  --topbar-grad-b: #eef2ef;
+  --panel-grad-a: #ffffff;
+  --panel-grad-b: #f6f8f6;
+  --btn-bg: #e2e7e4;
+  --btn-hover: #d4dbd7;
+  --chart-bg: #fcfdfc;
+  --input-bg: #ffffff;
+  --glow-accent: rgba(23, 143, 71, 0);
 }
 
 * { box-sizing: border-box; }
@@ -18,7 +58,7 @@ body {
   /* Faint accent wash from the top so the near-black background reads as lit
      rather than dead flat -- fixed so it stays put while panels scroll. */
   background:
-    radial-gradient(1200px 620px at 50% -12%, rgba(62, 207, 110, 0.06), transparent 70%),
+    radial-gradient(1200px 620px at 50% -12%, var(--bg-wash), transparent 70%),
     var(--bg);
   background-attachment: fixed;
   color: var(--text);
@@ -164,7 +204,7 @@ body {
   justify-content: space-between;
   padding: 0.9rem 1.5rem;
   border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, #1a1f21, #12161a);
+  background: linear-gradient(180deg, var(--topbar-grad-a), var(--topbar-grad-b));
   /* faint accent underline glow so the bar reads as lit, not just bordered */
   box-shadow: 0 1px 0 rgba(62, 207, 110, 0.14), 0 6px 18px rgba(0, 0, 0, 0.35);
   position: relative;
@@ -174,8 +214,8 @@ body {
   font-weight: 600;
   letter-spacing: 0.08em;
   font-size: 0.95rem;
-  /* subtle accent-tinted lift on the wordmark */
-  text-shadow: 0 0 18px rgba(62, 207, 110, 0.18);
+  /* subtle accent-tinted lift on the wordmark (fades to nothing in light mode) */
+  text-shadow: 0 0 18px var(--glow-accent);
 }
 .topbar-status { display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; color: var(--text-dim); }
 .mode-pill {
@@ -218,7 +258,7 @@ body {
 
 /* ---------------- Buttons ---------------- */
 .btn {
-  background: #23282a;
+  background: var(--btn-bg);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -228,7 +268,7 @@ body {
   transition: background 0.15s ease, border-color 0.15s ease,
               box-shadow 0.15s ease, transform 0.05s ease;
 }
-.btn:hover:not(:disabled) { background: #2d3234; }
+.btn:hover:not(:disabled) { background: var(--btn-hover); }
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn-primary {
@@ -337,7 +377,7 @@ body {
   flex-direction: column;
   /* Gentle elevation so panels sit above the background instead of being flat
      fills; hover lifts them a touch with an accent-tinted edge. */
-  background: linear-gradient(180deg, #171c1e, #12171a);
+  background: linear-gradient(180deg, var(--panel-grad-a), var(--panel-grad-b));
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset, 0 10px 26px rgba(0, 0, 0, 0.35);
   transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 }
@@ -367,12 +407,12 @@ body {
 
 .metric-row { display: flex; gap: 1.5rem; margin-bottom: 0.75rem; }
 .metric { display: flex; flex-direction: column; }
-.metric-value { font-size: 1.6rem; font-weight: 600; color: var(--accent); text-shadow: 0 0 18px rgba(62, 207, 110, 0.28); }
+.metric-value { font-size: 1.6rem; font-weight: 600; color: var(--accent); text-shadow: 0 0 18px var(--glow-accent); }
 .metric-label { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
 
 .chart {
   width: 100%; height: 190px; min-height: 190px; flex: 1 1 auto;
-  background: #0a0c0b; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 0.9rem;
+  background: var(--chart-bg); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 0.9rem;
 }
 
 .control-row { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.6rem; }
@@ -382,7 +422,7 @@ body {
 }
 .control-row label.check-inline input { margin: 0; }
 .control-row input[type="number"] {
-  width: 5rem; background: #0a0c0b; border: 1px solid var(--border); color: var(--text);
+  width: 5rem; background: var(--input-bg); border: 1px solid var(--border); color: var(--text);
   border-radius: 4px; padding: 0.35rem 0.5rem;
 }
 .control-row input[type="range"] { flex: 1; }
@@ -446,7 +486,7 @@ body {
   padding: 0.4rem 0.85rem; font: inherit; font-size: 0.85rem; cursor: pointer;
 }
 .seg-btn:first-child { border-left: none; }
-.seg-btn:hover:not(:disabled) { background: #2d3234; color: var(--text); }
+.seg-btn:hover:not(:disabled) { background: var(--btn-hover); color: var(--text); }
 .seg-btn.active { background: var(--accent); color: #06210f; font-weight: 600; }
 .seg-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
@@ -458,7 +498,7 @@ body {
 .damper-images figure { margin: 0; text-align: center; flex: 1 1 0; max-width: 220px; }
 .damper-images img {
   width: 100%; height: auto; display: block;
-  border: 1px solid var(--border); border-radius: 8px; background: #0c0f10;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--chart-bg);
 }
 .damper-images figcaption {
   color: var(--text-dim); font-size: 0.72rem; margin-top: 0.35rem;
@@ -479,7 +519,7 @@ body {
    it reads as a measurement to check against rather than UI chrome. */
 .logsum-answer {
   font-size: 1.05rem; font-weight: 600; color: var(--accent);
-  text-shadow: 0 0 18px rgba(62, 207, 110, 0.28);
+  text-shadow: 0 0 18px var(--glow-accent);
 }
 /* The raw accel-peak value: provenance for the number above, not the answer
    being checked -- so it's deliberately quieter. */
@@ -488,7 +528,52 @@ body {
 
 .file-btn {
   display: inline-block;
-  background: #23282a; color: var(--text); border: 1px solid var(--border);
+  background: var(--btn-bg); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 0.5rem 1rem; font-size: 0.9rem; cursor: pointer;
 }
-.file-btn:hover { background: #2d3234; }
+.file-btn:hover { background: var(--btn-hover); }
+
+/* ---------------- Theme toggle (topbar) ---------------- */
+.theme-toggle { padding: 0.3rem 0.7rem; font-size: 0.78rem; white-space: nowrap; }
+
+/* ---------------- Light-mode component overrides ----------------
+   The variable swap at the top handles most surfaces; these are the few
+   places whose dark styling is baked into gradients/shadows rather than
+   variables. */
+/* Primary/danger gradients were built dark-to-dark and their label color is
+   var(--text), which flips to near-black in light mode -- restate both as
+   solid-enough fills with white labels. */
+body.light .btn-primary {
+  background: linear-gradient(180deg, #23a95c, #178f47);
+  border-color: #128a42;
+  color: #fff;
+}
+body.light .btn-primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, #2bb765, #1a9c4e);
+  box-shadow: 0 0 12px rgba(23, 143, 71, 0.3);
+}
+body.light .btn-danger {
+  background: linear-gradient(180deg, #d95a44, #c8402f);
+  border-color: #b23a2a;
+  color: #fff;
+}
+body.light .btn-danger:hover:not(:disabled) {
+  background: linear-gradient(180deg, #e26a54, #d34a38);
+  box-shadow: 0 0 12px rgba(200, 64, 47, 0.3);
+}
+body.light .seg-btn.active { color: #fff; }
+body.light .btn.auto-mode, body.light .btn.auto-mode:disabled { color: #fff; }
+/* Heavy near-black elevation shadows read as smudges on a light page. */
+body.light .topbar {
+  box-shadow: 0 1px 0 rgba(23, 143, 71, 0.10), 0 4px 14px rgba(30, 40, 35, 0.10);
+}
+body.light .panel {
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.6) inset, 0 6px 18px rgba(30, 40, 35, 0.10);
+}
+body.light .panel:hover {
+  border-color: var(--accent);
+  box-shadow: 0 8px 22px rgba(30, 40, 35, 0.14), 0 0 0 1px rgba(23, 143, 71, 0.14);
+}
+/* The Serial Log stays a dark console in both themes (see :root comment);
+   just keep its shell borders consistent with the light chrome. */
+body.light .log-panel { background: #0b0d0c; }

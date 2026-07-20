@@ -26,6 +26,17 @@ modules, so it can be hosted as-is on GitHub Pages later.
    since they're occasional, longer-running operations with their own
    large plots rather than something to glance at continuously.
 
+Both the Status and Dashboard topbars carry a **☀ Light / 🌙 Dark** toggle.
+Dark is the default look; the choice persists in `localStorage`
+(`hmi-theme`). The DOM restyles through CSS variables (`body.light` in
+`css/style.css`), and the canvas charts — which can't read CSS variables —
+swap their own palette in step via `setChartTheme()` in `js/chart.js`, which
+also repaints every registered chart so plots that only redraw on
+interaction (sweep, bump, log summary) don't keep stale colors. Series
+colors passed as literals from `app.js` are darkened for the light
+background through `themedColor()`'s mapping table. The Serial Log panels
+deliberately stay dark in both themes.
+
 ## Demo mode
 
 `PCB1Client.enterDemoMode()` (in `js/pcb1-client.js`) makes the client fake

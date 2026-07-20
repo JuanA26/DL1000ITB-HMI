@@ -5,10 +5,86 @@
 // line trace. Not a general charting library, just enough for the live
 // dashboard panels.
 
-export const COLOR_AXIS  = '#5a6062';
-export const COLOR_GRID  = 'rgba(255,255,255,0.08)';
-export const COLOR_TEXT  = '#9aa0a0';
-export const COLOR_TITLE = '#eaeaea';
+// ---- Theme-aware chart palette ----
+// Charts draw straight to canvas, so CSS variables can't restyle them -- the
+// palette lives here instead, as `let` bindings (live exports, so bode-chart.js
+// sees updates too) swapped by setChartTheme() when the HMI's light/dark toggle
+// flips. Every chart registers itself in chartRegistry so setChartTheme() can
+// repaint the ones already on screen.
+const CHART_THEMES = {
+  dark: {
+    axis: '#5a6062',
+    grid: 'rgba(255,255,255,0.08)',
+    text: '#9aa0a0',
+    title: '#eaeaea',
+    mark: '#e0c341',                    // FFT peak / resonance / refY markers
+    markDim: 'rgba(224, 195, 65, 0.55)', // encoder-pulse vLines
+    cursor: 'rgba(255,255,255,0.35)',   // data-cursor crosshair
+    cursorOutline: '#fff',              // data-cursor point ring
+    tooltipBg: 'rgba(20,24,26,0.95)',
+  },
+  light: {
+    axis: '#9aa2a6',
+    grid: 'rgba(0,0,0,0.09)',
+    text: '#5a6468',
+    title: '#1c2124',
+    mark: '#9c7c14',
+    markDim: 'rgba(156, 124, 20, 0.55)',
+    cursor: 'rgba(0,0,0,0.35)',
+    cursorOutline: '#2a2f31',
+    tooltipBg: 'rgba(255,255,255,0.96)',
+  },
+};
+
+export let COLOR_AXIS  = CHART_THEMES.dark.axis;
+export let COLOR_GRID  = CHART_THEMES.dark.grid;
+export let COLOR_TEXT  = CHART_THEMES.dark.text;
+export let COLOR_TITLE = CHART_THEMES.dark.title;
+export let COLOR_MARK  = CHART_THEMES.dark.mark;
+export let COLOR_MARK_DIM = CHART_THEMES.dark.markDim;
+export let COLOR_CURSOR = CHART_THEMES.dark.cursor;
+export let COLOR_CURSOR_OUTLINE = CHART_THEMES.dark.cursorOutline;
+export let COLOR_TOOLTIP_BG = CHART_THEMES.dark.tooltipBg;
+
+// Series colors were tuned for the dark background, and callers (app.js) pass
+// them as literals -- rather than rewire every call site, draw code funnels
+// series colors through themedColor(), which darkens the known palette entries
+// so they keep contrast on the light chart background. Unknown colors pass
+// through untouched.
+const LIGHT_SERIES_MAP = {
+  '#3ecf6e': '#178f47', // accent green
+  '#9aa0a0': '#5f696c', // gray (Target RPM)
+  '#e0c341': '#9c7c14', // gold (Duty, overlay 1)
+  '#5aa9e6': '#2277c9', // blue (FFT, overlay 2)
+  '#e0704a': '#c04e28', // orange (overlay 3)
+  '#b57edc': '#8a4fc0', // purple (overlay 4)
+  '#4ad9c1': '#12907c', // teal (overlay 5)
+  '#e05a8f': '#c02a63', // pink (overlay 6)
+};
+let chartThemeName = 'dark';
+export function themedColor(color) {
+  if (chartThemeName === 'light') return LIGHT_SERIES_MAP[color] || color;
+  return color;
+}
+
+// Every live chart instance (RollingChart + BodeChart), so a theme switch can
+// repaint charts that only redraw on interaction (sweep, bump, log summary).
+export const chartRegistry = new Set();
+
+export function setChartTheme(name) {
+  const t = CHART_THEMES[name] || CHART_THEMES.dark;
+  chartThemeName = CHART_THEMES[name] ? name : 'dark';
+  COLOR_AXIS = t.axis;
+  COLOR_GRID = t.grid;
+  COLOR_TEXT = t.text;
+  COLOR_TITLE = t.title;
+  COLOR_MARK = t.mark;
+  COLOR_MARK_DIM = t.markDim;
+  COLOR_CURSOR = t.cursor;
+  COLOR_CURSOR_OUTLINE = t.cursorOutline;
+  COLOR_TOOLTIP_BG = t.tooltipBg;
+  for (const chart of chartRegistry) chart.draw();
+}
 
 export class RollingChart {
   constructor(canvas, {
@@ -72,6 +148,7 @@ export class RollingChart {
     this.canvas.addEventListener('mousedown', (e) => this._onDragStart(e));
     window.addEventListener('mousemove', (e) => this._onDragMove(e));
     window.addEventListener('mouseup', () => this._onDragEnd());
+    chartRegistry.add(this);
     this._resize();
     window.addEventListener('resize', () => this._resize());
   }
@@ -287,7 +364,7 @@ export class RollingChart {
       let sx = x0 + plotW - widths.reduce((a, b) => a + b, 0);
       ctx.textAlign = 'left';
       labeled.forEach((s, i) => {
-        ctx.fillStyle = s.color;
+        ctx.fillStyle = themedColor(s.color);
         ctx.fillRect(sx, 6, 9, 9);
         ctx.fillStyle = COLOR_TEXT;
         ctx.fillText(s.label, sx + 13, 11);
@@ -381,7 +458,7 @@ export class RollingChart {
     // ---- Series traces ----
     if (this.t.length >= 2) {
       this.data.forEach((s, i) => {
-        ctx.strokeStyle = this.series[i].color;
+        ctx.strokeStyle = themedColor(this.series[i].color);
         ctx.lineWidth = 1.75;
         ctx.beginPath();
         for (let idx = 0; idx < s.length; idx++) {
@@ -402,7 +479,7 @@ export class RollingChart {
         if (p.x < tMin || p.x > tMin + tSpan) return;
         const px = x0 + ((p.x - tMin) / tSpan) * plotW;
         const py = y0 + plotH - ((p.y - yMin) / (yMax - yMin)) * plotH;
-        ctx.fillStyle = '#e0c341';
+        ctx.fillStyle = COLOR_MARK;
         ctx.beginPath();
         ctx.moveTo(px, py - 8);
         ctx.lineTo(px - 4, py - 1);
@@ -419,7 +496,7 @@ export class RollingChart {
     if (this._hover) {
       const { px, py, dataX, dataY, color, label } = this._hover;
       ctx.save();
-      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.strokeStyle = COLOR_CURSOR;
       ctx.lineWidth = 1;
       ctx.setLineDash([3, 3]);
       ctx.beginPath(); ctx.moveTo(x0, py); ctx.lineTo(x0 + plotW, py); ctx.stroke();
@@ -428,10 +505,10 @@ export class RollingChart {
 
       ctx.beginPath();
       ctx.arc(px, py, 4.5, 0, 2 * Math.PI);
-      ctx.fillStyle = color;
+      ctx.fillStyle = themedColor(color);
       ctx.fill();
       ctx.lineWidth = 1.5;
-      ctx.strokeStyle = '#fff';
+      ctx.strokeStyle = COLOR_CURSOR_OUTLINE;
       ctx.stroke();
 
       // Span-scaled cursor precision (see formatCursor) -- axis-tick rounding
@@ -445,7 +522,7 @@ export class RollingChart {
       if (bx + boxW > x0 + plotW) bx = px - boxW - 10;
       if (by < y0) by = py + 10;
 
-      ctx.fillStyle = 'rgba(20,24,26,0.95)';
+      ctx.fillStyle = COLOR_TOOLTIP_BG;
       ctx.strokeStyle = COLOR_AXIS;
       ctx.lineWidth = 1;
       ctx.beginPath();

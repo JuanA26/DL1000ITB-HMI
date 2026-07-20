@@ -1,10 +1,38 @@
 import { PCB1Client } from './pcb1-client.js';
-import { RollingChart } from './chart.js';
+import { RollingChart, setChartTheme } from './chart.js';
 import { BodeChart } from './bode-chart.js';
 import { computeFFT, findPeaks } from './fft.js';
 import { lowpassFiltfilt } from './filter.js';
 
 const client = new PCB1Client();
+
+// ============================================================
+// Light/dark theme -- the topbar sun/moon buttons toggle body.light (CSS
+// variables restyle the DOM) and swap the canvas-chart palette in step
+// (setChartTheme repaints every registered chart, including static ones like
+// the sweep/bump plots that otherwise only redraw on interaction). Persisted
+// so the choice survives reloads. Dark stays the default look.
+// ============================================================
+const THEME_KEY = 'hmi-theme';
+let theme = localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark';
+
+function applyTheme() {
+  document.body.classList.toggle('light', theme === 'light');
+  setChartTheme(theme);
+  document.querySelectorAll('.theme-toggle').forEach((btn) => {
+    btn.textContent = theme === 'light' ? '🌙 Dark' : '☀ Light';
+    btn.title = theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode';
+  });
+}
+applyTheme(); // runs before the charts below are constructed, so their first draw matches
+
+document.querySelectorAll('.theme-toggle').forEach((btn) =>
+  btn.addEventListener('click', () => {
+    theme = theme === 'light' ? 'dark' : 'light';
+    localStorage.setItem(THEME_KEY, theme);
+    applyTheme();
+  }),
+);
 
 // ============================================================
 // Apparatus panel image -- one reference render, swapped between deployed
