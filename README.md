@@ -196,6 +196,29 @@ and each panel's Stop only tears the session down once *neither* wants it
 stopping the mode; stopping Accel while RPM is still wanted just stops
 *listening* to `V` rows the firmware keeps sending).
 
+**Opening that shared session goes through one funnel** (`_joinLiveSession()`),
+and it has to. All three entry points — `startTargetRpmControl()`,
+`startOpenLoopDuty()`, `startVibrationLive()` — used to test `_mode === 'live'`
+and only *set* it after an `await`, so two panels starting in the same tick both
+passed the test and both opened a session: the demo leaked a `setInterval` (two
+timers racing the same events), hardware wrote two `live` commands, and in both
+cases the second caller's `_vibWanted = false` (or `_rpmWanted = false`) cleared
+the **first** panel's flag — that panel then went silent while the session
+streamed happily for the other one, which is a nasty thing to debug because
+nothing errors. The funnel stores the in-flight open as a promise, so a
+concurrent caller awaits that one instead of racing a second up.
+
+Two rules fall out of it, both load-bearing:
+- **The session always opens at `live 0`**, and each caller applies its own
+  intent afterwards (`t <rpm>`, `d <duty>`, or nothing for the Accel panel).
+  That's what lets a joiner and an opener run the same path. Cost is one extra
+  line on start — `live 0` + `t 1200` instead of `live 1200` — which the
+  firmware treats identically since the controller ramps to target either way.
+- **Panel flags are set *after* the join, never before**, because
+  `_ensureIdle()` inside it runs `_resetStreams()`, which would wipe a flag set
+  beforehand. Each entry point now only ever sets its **own** flag, so it can't
+  clear the other panel's.
+
 Wired up: `live` (RPM + Accel panels, concurrently), `strobe` (Stroboscope
 panel), `accelcheck` (status screen's accelerometer check), `relay`
 (Auxiliary panel), `sweep` (Sweep/Bode modal), `bump` (Bump Test modal), and

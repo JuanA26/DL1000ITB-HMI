@@ -67,6 +67,10 @@ export class PCB1Client extends EventTarget {
     // startTargetRpmControl/startVibrationLive/stopRpm/stopVibrationLive.
     this._rpmWanted = false;
     this._vibWanted = false;
+    // In-flight `live` session open, or null. Shared by all three entry points
+    // so concurrent starts join one session instead of racing two up -- see
+    // _joinLiveSession().
+    this._liveStarting = null;
     // In-progress bulk frame (e.g. bump dump), or null. See _onLine()'s frame
     // handling and _bump.
     this._frame = null;
@@ -244,23 +248,53 @@ export class PCB1Client extends EventTarget {
   }
 
   // ---- `live` mode: target-RPM control + decimated vibration, concurrently ----
-  // startTargetRpmControl() and startVibrationLive() both drive this SAME
-  // underlying PCB1 mode, so the RPM and Accel panels can stream at the same
-  // time: whichever starts it first launches the shared session, the other
-  // just joins it. Each panel's Stop only tears down the session once NEITHER
-  // panel wants it -- see stopRpm()/stopVibrationLive().
+  // startTargetRpmControl(), startOpenLoopDuty() and startVibrationLive() all
+  // drive this SAME underlying PCB1 mode, so the Motor and Accel panels can
+  // stream at the same time: whichever asks first opens the shared session, the
+  // others join it. Each panel's Stop only tears the session down once NO panel
+  // wants it -- see stopRpm()/stopVibrationLive().
+  //
+  // Opening is funnelled through this one method so that two panels asking in
+  // the SAME TICK get one session, not two. Each entry point used to test
+  // `_mode === 'live'` and only set it after an await, so both could pass the
+  // test: the demo leaked a setInterval (two timers racing the same events),
+  // hardware got two `live` commands, and in both cases the second caller's
+  // `_vibWanted = false` (or `_rpmWanted = false`) cleared the FIRST panel's
+  // flag -- that panel then went quiet while the session streamed happily for
+  // the other one. The window is a microtask in demo mode but a real serial
+  // write on hardware, so it is not theoretical there.
+  _joinLiveSession() {
+    if (this._mode === 'live') return Promise.resolve();
+    // A start is already in flight -- possibly from the other panel, this same
+    // tick. Await THAT one instead of racing a second session up. This
+    // assignment lands before control returns to any concurrent caller, which
+    // is what makes the claim effective.
+    if (this._liveStarting) return this._liveStarting;
+    this._liveStarting = (async () => {
+      try {
+        await this._ensureIdle();
+        // Always opens at target 0 and lets the caller apply its own intent
+        // (target RPM or duty) once the session is up. Uniform for every entry
+        // point, which is precisely what lets a joiner and an opener run the
+        // same code path afterwards instead of each having a bespoke one.
+        if (this._demo) { this._demoStartLive(0); return; }
+        await this.link.write('live 0\n');
+        this._setMode('live');
+      } finally {
+        this._liveStarting = null;
+      }
+    })();
+    return this._liveStarting;
+  }
+
   async startTargetRpmControl(initialTargetRpm) {
-    if (this._mode === 'live') {
-      this._rpmWanted = true;
-      this._notifyMode();
-      return this.setTargetRpm(initialTargetRpm);
-    }
-    await this._ensureIdle();
+    await this._joinLiveSession();
+    // Set AFTER the join, never before: _ensureIdle() inside it runs
+    // _resetStreams(), which would wipe a flag set beforehand. Each entry point
+    // now only ever sets its OWN flag, so it cannot clear the other panel's.
     this._rpmWanted = true;
-    this._vibWanted = false;
-    if (this._demo) return this._demoStartLive(initialTargetRpm);
-    await this.link.write(`live ${initialTargetRpm}\n`);
-    this._setMode('live');
+    this._notifyMode();
+    return this.setTargetRpm(initialTargetRpm);
   }
 
   async setTargetRpm(targetRpm) {
@@ -277,18 +311,10 @@ export class PCB1Client extends EventTarget {
   // streaming across a switch and the shaft doesn't stop. Starting here just
   // opens the session with the motor idle, then sends the duty.
   async startOpenLoopDuty(initialDuty) {
-    if (this._mode === 'live') {
-      this._rpmWanted = true;
-      this._notifyMode();
-      return this.setOpenLoopDuty(initialDuty);
-    }
-    await this._ensureIdle();
+    await this._joinLiveSession();
     this._rpmWanted = true;
-    this._vibWanted = false;
-    if (this._demo) return this._demoStartLive(0, initialDuty);
-    await this.link.write('live 0\n');
-    this._setMode('live');
-    await this.link.write(`d ${initialDuty}\n`);
+    this._notifyMode();
+    return this.setOpenLoopDuty(initialDuty);
   }
 
   // Live duty adjustment (the slider drags through this). Throttling is the
@@ -380,19 +406,13 @@ export class PCB1Client extends EventTarget {
   }
 
   // ---- `live` mode (see startTargetRpmControl above): the vibration side. ----
-  // Defaults the motor's target to 0 (off) when it launches the session.
+  // Leaves the motor at the session's target 0 (off) -- this panel has no
+  // opinion about speed, so unlike the two motor entry points it applies no
+  // intent after joining.
   async startVibrationLive() {
-    if (this._mode === 'live') {
-      this._vibWanted = true;
-      this._notifyMode();
-      return;
-    }
-    await this._ensureIdle();
-    this._rpmWanted = false;
+    await this._joinLiveSession();
     this._vibWanted = true;
-    if (this._demo) return this._demoStartLive(0);
-    await this.link.write('live 0\n');
-    this._setMode('live');
+    this._notifyMode();
   }
 
   // Stops the Accel panel's own data. If the RPM panel still wants the
@@ -690,12 +710,17 @@ export class PCB1Client extends EventTarget {
     return rpm <= 0 ? 0 : Math.min(255, 35 + rpm / 13.5);
   }
 
-  // openLoopDuty !== null starts the session in open loop (see
-  // startOpenLoopDuty); otherwise it's closed-loop on initialTargetRpm.
-  _demoStartLive(initialTargetRpm, openLoopDuty = null) {
+  // Always opens closed-loop at initialTargetRpm; callers apply their own
+  // intent afterwards (setTargetRpm / setOpenLoopDuty), same as the hardware
+  // path. See _joinLiveSession().
+  _demoStartLive(initialTargetRpm) {
+    // Belt and braces against ever being entered twice: a leaked interval keeps
+    // emitting events forever and there'd be no handle left to stop it. The
+    // _joinLiveSession() funnel is what actually prevents this.
+    clearInterval(this._demoTimer);
     this._demoTargetRpm = initialTargetRpm;
-    this._demoOpenLoop = openLoopDuty !== null;
-    this._demoOpenDuty = openLoopDuty ?? 0;
+    this._demoOpenLoop = false;
+    this._demoOpenDuty = 0;
     this._setMode('live');
     let t = 0;
     let simRpm = 0;
