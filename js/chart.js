@@ -86,6 +86,103 @@ export function setChartTheme(name) {
   for (const chart of chartRegistry) chart.draw();
 }
 
+const CHART_FONT = '11px Segoe UI, sans-serif';
+const CHART_TITLE_FONT = '600 12px Segoe UI, sans-serif';
+
+// Width reserved for the y tick labels, as a WORST-CASE TEMPLATE rather than
+// the width of the labels currently on the axis.
+//
+// Measuring the current labels is the obvious thing and it is wrong on a live
+// chart: an autoscaling axis changes its widest label as the data grows
+// ("0.40" gains a minus sign the first time the trace dips negative; "500.0"
+// becomes "2000" during spin-up), so the left margin -- and with it the whole
+// plot box -- shifted by a few pixels every time the axis rescaled. On a
+// streaming chart that reads as a constant squish/expand.
+//
+// This template is the widest string formatTick can produce for any axis in
+// this app (see formatTick's three branches: "-999.9" is wider than either
+// "-9.99" or "-3400"), so the box is pinned for the whole run. Two bonuses:
+// stacked pairs that are meant to be read against each other -- rpm/duty, and
+// the sweep's amplitude/phase -- now share one left margin, so their x-axes
+// line up. max() below keeps a pathological domain (values in the millions)
+// from colliding anyway, at the cost of stability only in that case.
+const TICK_RESERVE_TEMPLATE = '-000.0';
+
+// Shared frame layout for both chart classes (RollingChart + BodeChart), which
+// draw identical furniture around their plot areas.
+//
+// The margins are MEASURED from the text that has to fit in them rather than
+// fixed, because fixed ones collide as soon as the text grows: a "200.0" y tick
+// label overran the 44px left margin and printed straight through the rotated
+// "Duty (0-255)" axis title, and a long chart title ran into the legend. So the
+// left margin is sized from the widest tick label the current y-domain will
+// produce, and a title/legend that won't fit on one row puts the legend on its
+// own row underneath (growing the top strip to match).
+//
+// Draws the title, legend and both axis titles as a side effect, and returns
+// the plot-area geometry the caller needs for everything inside the axes.
+export function layoutChartFrame(ctx, {
+  w, h, title = '', xLabel = '', yLabel = '', yTicks = [], legend = [],
+} = {}) {
+  ctx.font = CHART_FONT;
+  const yTitleBand = yLabel ? 17 : 0;                    // rotated axis title
+  const tickW = Math.max(
+    ctx.measureText(TICK_RESERVE_TEMPLATE).width,        // fixed reserve -- see above
+    yTicks.reduce((mx, v) => Math.max(mx, ctx.measureText(formatTick(v)).width), 0),
+  );
+  const padLeft = Math.ceil(yTitleBand + tickW + 10);    // + 6px tick gap + 4px edge
+  const padRight = 10;
+  const padBottom = xLabel ? 34 : 20;                    // tick row + axis title row
+
+  ctx.font = CHART_TITLE_FONT;
+  const titleW = title ? ctx.measureText(title).width : 0;
+  ctx.font = CHART_FONT;
+  const labeled = legend ? [...legend].filter((s) => s && s.label) : [];
+  const itemW = labeled.map((s) => ctx.measureText(s.label).width + 16);
+  const legendW = itemW.reduce((a, b) => a + b, 0);
+  const legendWrapped = !!title && legendW > 0 &&
+                        titleW + 14 + legendW > Math.max(1, w - padLeft - padRight);
+  const padTop = title ? (legendWrapped ? 44 : 28) : (legendW ? 24 : 16);
+
+  const plotW = Math.max(1, w - padLeft - padRight);
+  const plotH = Math.max(1, h - padTop - padBottom);
+  const x0 = padLeft, y0 = padTop;
+
+  if (title) {
+    ctx.font = CHART_TITLE_FONT;
+    ctx.fillStyle = COLOR_TITLE;
+    ctx.textAlign = 'left';
+    ctx.fillText(title, x0, 11);
+  }
+
+  ctx.font = CHART_FONT;
+  if (legendW) {
+    const ly = legendWrapped ? 28 : 11;
+    let sx = x0 + plotW - legendW;
+    ctx.textAlign = 'left';
+    labeled.forEach((s, i) => {
+      ctx.fillStyle = themedColor(s.color);
+      ctx.fillRect(sx, ly - 4, 9, 9);
+      ctx.fillStyle = COLOR_TEXT;
+      ctx.fillText(s.label, sx + 13, ly);
+      sx += itemW[i];
+    });
+  }
+
+  ctx.fillStyle = COLOR_TEXT;
+  ctx.textAlign = 'center';
+  if (xLabel) ctx.fillText(xLabel, x0 + plotW / 2, y0 + plotH + 26);
+  if (yLabel) {
+    ctx.save();
+    ctx.translate(Math.round(yTitleBand / 2), y0 + plotH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText(yLabel, 0, 0);
+    ctx.restore();
+  }
+
+  return { x0, y0, plotW, plotH };
+}
+
 export class RollingChart {
   constructor(canvas, {
     title = '',
@@ -342,37 +439,11 @@ export class RollingChart {
     ctx.clearRect(0, 0, w, h);
     ctx.textBaseline = 'middle';
 
-    const padTop = this.title ? 28 : 16;
-    const padBottom = 30;
-    const padLeft = 44;
-    const padRight = 10;
-    const plotW = Math.max(1, w - padLeft - padRight);
-    const plotH = Math.max(1, h - padTop - padBottom);
-    const x0 = padLeft, y0 = padTop;
-
-    if (this.title) {
-      ctx.font = '600 12px Segoe UI, sans-serif';
-      ctx.fillStyle = COLOR_TITLE;
-      ctx.textAlign = 'left';
-      ctx.fillText(this.title, x0, 11);
-    }
-
-    ctx.font = '11px Segoe UI, sans-serif';
-    const labeled = this.series.filter((s) => s.label);
-    if (labeled.length) {
-      const widths = labeled.map((s) => ctx.measureText(s.label).width + 16);
-      let sx = x0 + plotW - widths.reduce((a, b) => a + b, 0);
-      ctx.textAlign = 'left';
-      labeled.forEach((s, i) => {
-        ctx.fillStyle = themedColor(s.color);
-        ctx.fillRect(sx, 6, 9, 9);
-        ctx.fillStyle = COLOR_TEXT;
-        ctx.fillText(s.label, sx + 13, 11);
-        sx += widths[i];
-      });
-    }
-
     // ---- Y domain + ticks ----
+    // Resolved BEFORE the layout below, because the widest tick label is what
+    // decides how much left margin the axes need -- a fixed padLeft ran wide
+    // labels ("200.0") straight through the rotated y-axis title.
+    //
     // Wheel-zoom (_onWheel) overrides autoscale/fixed-yMin-yMax alike with
     // a user-picked window; resetZoom() (double-click) clears it back.
     let yMin, yMax, yTicks;
@@ -392,6 +463,11 @@ export class RollingChart {
       }
     }
     if (yMax === yMin) yMax = yMin + 1;
+
+    const { x0, y0, plotW, plotH } = layoutChartFrame(ctx, {
+      w, h, title: this.title, xLabel: this.xLabel, yLabel: this.yLabel,
+      yTicks, legend: this.series,
+    });
 
     // push() already trims to the last windowSeconds when set, so the
     // buffered range itself is the visible span -- no separate fixed
@@ -442,18 +518,6 @@ export class RollingChart {
     ctx.beginPath();
     ctx.moveTo(x0, y0); ctx.lineTo(x0, y0 + plotH); ctx.lineTo(x0 + plotW, y0 + plotH);
     ctx.stroke();
-
-    // ---- Axis titles ----
-    ctx.fillStyle = COLOR_TEXT;
-    ctx.textAlign = 'center';
-    ctx.fillText(this.xLabel, x0 + plotW / 2, y0 + plotH + 24);
-    if (this.yLabel) {
-      ctx.save();
-      ctx.translate(11, y0 + plotH / 2);
-      ctx.rotate(-Math.PI / 2);
-      ctx.fillText(this.yLabel, 0, 0);
-      ctx.restore();
-    }
 
     // ---- Series traces ----
     if (this.t.length >= 2) {
@@ -587,8 +651,15 @@ export function niceTicks(min, max, maxTicks = 5) {
   if (min === max) { min -= 1; max += 1; }
   const range = niceNum(max - min, false);
   const step = niceNum(range / (maxTicks - 1), true);
-  const niceMin = Math.floor(min / step) * step;
-  const niceMax = Math.ceil(max / step) * step;
+  // Nudge before rounding outward. Data whose extreme lands EXACTLY on a tick
+  // rarely divides exactly in floating point -- 0.3/0.1 is 3.0000000000000004,
+  // so a bare Math.ceil jumps to 4 and the axis gains a whole empty step (a
+  // 0-0.3 s trace drawn on a 0-0.4 s axis). The error is ~1e-16 relative, so a
+  // 1e-9 tolerance kills it without ever swallowing a real data point: nothing
+  // that far inside a tick is distinguishable on screen anyway.
+  const EPS = 1e-9;
+  const niceMin = Math.floor(min / step + EPS) * step;
+  const niceMax = Math.ceil(max / step - EPS) * step;
   const ticks = [];
   for (let v = niceMin; v <= niceMax + step * 0.5; v += step) ticks.push(Math.round(v * 1e6) / 1e6);
   return { ticks, min: niceMin, max: niceMax };

@@ -8,7 +8,7 @@
 import {
   COLOR_AXIS, COLOR_GRID, COLOR_TEXT, COLOR_TITLE,
   COLOR_MARK, COLOR_MARK_DIM, COLOR_CURSOR, COLOR_CURSOR_OUTLINE, COLOR_TOOLTIP_BG,
-  themedColor, chartRegistry, niceTicks, formatTick, formatCursor,
+  themedColor, chartRegistry, niceTicks, formatTick, formatCursor, layoutChartFrame,
 } from './chart.js';
 
 export class BodeChart {
@@ -245,37 +245,7 @@ export class BodeChart {
     ctx.clearRect(0, 0, w, h);
     ctx.textBaseline = 'middle';
 
-    const padTop = this.title ? 28 : 16;
-    const padBottom = 34;
-    const padLeft = 48;
-    const padRight = 10;
-    const plotW = Math.max(1, w - padLeft - padRight);
-    const plotH = Math.max(1, h - padTop - padBottom);
-    const x0 = padLeft, y0 = padTop;
-
-    if (this.title) {
-      ctx.font = '600 12px Segoe UI, sans-serif';
-      ctx.fillStyle = COLOR_TITLE;
-      ctx.textAlign = 'left';
-      ctx.fillText(this.title, x0, 11);
-    }
-
-    ctx.font = '11px Segoe UI, sans-serif';
     const series = [...this.series.values()];
-    const labeled = series.filter((s) => s.label);
-    if (labeled.length) {
-      const widths = labeled.map((s) => ctx.measureText(s.label).width + 16);
-      let sx = x0 + plotW - widths.reduce((a, b) => a + b, 0);
-      ctx.textAlign = 'left';
-      labeled.forEach((s, i) => {
-        ctx.fillStyle = themedColor(s.color);
-        ctx.fillRect(sx, 6, 9, 9);
-        ctx.fillStyle = COLOR_TEXT;
-        ctx.fillText(s.label, sx + 13, 11);
-        sx += widths[i];
-      });
-    }
-
     const allPoints = series.flatMap((s) => s.points);
     const xs = allPoints.map((p) => p.x);
     const ys = allPoints.map((p) => p.y);
@@ -306,6 +276,14 @@ export class BodeChart {
       yMin = yNice.min; yMax = yNice.max === yNice.min ? yNice.min + 1 : yNice.max;
       yTicks = yNice.ticks;
     }
+
+    // Frame (title/legend/axis titles) and the margins they need. Drawn after
+    // the domains are known because the left margin is sized from the widest
+    // y tick label -- see layoutChartFrame().
+    const { x0, y0, plotW, plotH } = layoutChartFrame(ctx, {
+      w, h, title: this.title, xLabel: this.xLabel, yLabel: this.yLabel,
+      yTicks, legend: series,
+    });
 
     // Cached for _onMouseMove's hit-testing (data cursor) -- draw() is the
     // only place that (re)computes the axis domain.
@@ -338,18 +316,6 @@ export class BodeChart {
     ctx.beginPath();
     ctx.moveTo(x0, y0); ctx.lineTo(x0, y0 + plotH); ctx.lineTo(x0 + plotW, y0 + plotH);
     ctx.stroke();
-
-    // ---- Axis titles ----
-    ctx.fillStyle = COLOR_TEXT;
-    ctx.textAlign = 'center';
-    ctx.fillText(this.xLabel, x0 + plotW / 2, y0 + plotH + 24);
-    if (this.yLabel) {
-      ctx.save();
-      ctx.translate(13, y0 + plotH / 2);
-      ctx.rotate(-Math.PI / 2);
-      ctx.fillText(this.yLabel, 0, 0);
-      ctx.restore();
-    }
 
     // ---- Resonance reference line (e.g. natural frequency, converted to
     // RPM by the caller since this chart's x-axis is RPM) ----

@@ -2,7 +2,7 @@ import { PCB1Client } from './pcb1-client.js';
 import { RollingChart, setChartTheme } from './chart.js';
 import { BodeChart } from './bode-chart.js';
 import { computeFFT, findPeaks } from './fft.js';
-import { lowpassFiltfilt } from './filter.js';
+import { lowpassFiltfilt, syncAverage } from './filter.js';
 
 const client = new PCB1Client();
 
@@ -336,11 +336,21 @@ client.addEventListener('mode', (e) => {
 });
 
 // ============================================================
-// RPM panel (HMI `live` -- closed-loop target RPM control; shares the
-// combined live session with the Accel panel, see PCB1Client)
+// Motor panel (HMI `live` -- shares the combined live session with the Accel
+// panel, see PCB1Client). Two loops, one session:
+//   - CLOSED: `t <rpm>`, PI+feedforward holds the target RPM.
+//   - OPEN:   `d <duty>`, the commanded 0-255 PWM goes straight to the motor
+//             and the resulting speed is whatever the load allows.
+// Both are settings *within* PCB1's one `live` mode, not separate modes, so
+// the selector can be flipped mid-run without stopping the shaft or the Accel
+// panel -- which is the demonstration (open loop sags under load near
+// resonance where closed loop holds).
 // ============================================================
 const rpmSlider = document.getElementById('rpm-target-slider');
 const rpmNumber = document.getElementById('rpm-target-number');
+const rpmInputLabel = document.getElementById('rpm-input-label');
+const segRpmClosed = document.getElementById('rpm-mode-closed');
+const segRpmOpen = document.getElementById('rpm-mode-open');
 const btnRpmStart = document.getElementById('btn-rpm-start');
 const btnRpmStop = document.getElementById('btn-rpm-stop');
 const rpmTargetValue = document.getElementById('rpm-target-value');
@@ -364,14 +374,86 @@ const dutyChart = new RollingChart(document.getElementById('duty-chart'), {
   maxPoints: 400,
 });
 
-rpmSlider.addEventListener('input', () => { rpmNumber.value = rpmSlider.value; });
-rpmNumber.addEventListener('input', () => { rpmSlider.value = rpmNumber.value; });
+const RPM_MAX = 3400;
+const DUTY_MAX = 255;
+let openLoop = false;
+// One slider serves both loops, but RPM and duty are different quantities on
+// different scales -- so each keeps its own remembered value rather than
+// carrying a number across that would mean nothing there (and 3400 "duty"
+// would just clamp to full).
+let lastTargetRpm = 0;
+let lastDuty = 0;
+
+function loopMax() { return openLoop ? DUTY_MAX : RPM_MAX; }
+function loopValue() { return clamp(Number(rpmNumber.value), 0, loopMax()); }
+
+function renderLoopMode() {
+  segRpmClosed.classList.toggle('active', !openLoop);
+  segRpmClosed.setAttribute('aria-pressed', String(!openLoop));
+  segRpmOpen.classList.toggle('active', openLoop);
+  segRpmOpen.setAttribute('aria-pressed', String(openLoop));
+
+  const max = loopMax();
+  rpmSlider.max = String(max);
+  rpmNumber.max = String(max);
+  rpmInputLabel.textContent = openLoop ? 'Duty (0-255)' : 'Target RPM';
+  const v = clamp(openLoop ? lastDuty : lastTargetRpm, 0, max);
+  rpmSlider.value = String(v);
+  rpmNumber.value = String(v);
+}
+renderLoopMode();
+
+// Open-loop duty is adjusted LIVE as the slider is dragged -- that's the point
+// of the mode, so this is throttled rather than debounced. A debounce would
+// send nothing until the drag stopped, which is exactly the feel to avoid;
+// the trailing timer still guarantees the final position lands.
+const DUTY_SEND_INTERVAL_MS = 80;
+let dutySendAt = 0;
+let dutySendTimer = null;
+function sendDutyLive(duty) {
+  clearTimeout(dutySendTimer);
+  dutySendTimer = setTimeout(() => {
+    dutySendAt = performance.now();
+    client.setOpenLoopDuty(duty).catch((err) => appendLog('[error] ' + err.message));
+  }, Math.max(0, DUTY_SEND_INTERVAL_MS - (performance.now() - dutySendAt)));
+}
+
+function onLoopValueInput() {
+  const v = loopValue();
+  if (openLoop) {
+    lastDuty = v;
+    if (client.rpmActive) sendDutyLive(v);
+  } else {
+    lastTargetRpm = v;   // closed loop retargets on 'change' instead -- see below
+  }
+}
+rpmSlider.addEventListener('input', () => { rpmNumber.value = rpmSlider.value; onLoopValueInput(); });
+rpmNumber.addEventListener('input', () => { rpmSlider.value = rpmNumber.value; onLoopValueInput(); });
+
+// Switching loop while the motor is running hands the live session over to the
+// other controller; the firmware makes that bumpless both ways (see
+// runHmiLive), so the shaft keeps turning and the Accel panel sees no gap.
+async function setLoopMode(next) {
+  if (openLoop === next) return;
+  openLoop = next;
+  renderLoopMode();
+  if (!client.rpmActive) return;
+  try {
+    if (openLoop) await client.setOpenLoopDuty(lastDuty);
+    else await client.setTargetRpm(lastTargetRpm);
+  } catch (err) {
+    appendLog('[error] ' + err.message);
+  }
+}
+segRpmClosed.addEventListener('click', () => setLoopMode(false));
+segRpmOpen.addEventListener('click', () => setLoopMode(true));
 
 btnRpmStart.addEventListener('click', async () => {
-  const target = clamp(Number(rpmNumber.value), 0, 3400);
+  const v = loopValue();
   btnRpmStart.disabled = true;
   try {
-    await client.startTargetRpmControl(target);
+    if (openLoop) await client.startOpenLoopDuty(v);
+    else await client.startTargetRpmControl(v);
     rpmChart.clear();
     dutyChart.clear();
   } catch (err) {
@@ -389,20 +471,27 @@ btnRpmStop.addEventListener('click', async () => {
   await client.stopRpm();
 });
 
+// Closed loop retargets on 'change' (slider release), not 'input': each new
+// setpoint is a step the controller then has to settle, so streaming them
+// mid-drag would just chase the slider. Open loop is the opposite and is
+// handled live in onLoopValueInput() above.
 let targetDebounce = null;
 [rpmSlider, rpmNumber].forEach((el) => {
   el.addEventListener('change', () => {
-    if (!client.rpmActive) return;
+    if (openLoop || !client.rpmActive) return;
     clearTimeout(targetDebounce);
     targetDebounce = setTimeout(() => {
-      client.setTargetRpm(clamp(Number(el.value), 0, 3400)).catch((err) => appendLog('[error] ' + err.message));
+      client.setTargetRpm(clamp(Number(el.value), 0, RPM_MAX)).catch((err) => appendLog('[error] ' + err.message));
     }, 100);
   });
 });
 
 client.addEventListener('rpm-sample', (e) => {
   const s = e.detail;
-  rpmTargetValue.textContent = s.target_rpm.toFixed(0);
+  // Open loop has no setpoint, so the firmware reports target as `nan`. Show a
+  // dash and let the chart's Target trace break rather than drawing a
+  // fictitious flat line at 0.
+  rpmTargetValue.textContent = Number.isFinite(s.target_rpm) ? s.target_rpm.toFixed(0) : '—';
   rpmMeasuredValue.textContent = s.rpm.toFixed(0);
   rpmRawValue.textContent = s.raw_rpm.toFixed(0);
   rpmDutyValue.textContent = s.duty.toFixed(0);
@@ -421,7 +510,7 @@ const accelCrestValue = document.getElementById('accel-crest-value');
 const accelStatus = document.getElementById('accel-status');
 const ACCEL_WINDOW_S = 3;
 const accelChart = new RollingChart(document.getElementById('accel-chart'), {
-  title: 'Vibration (live, decimated ~100 SPS)',
+  title: 'Vibration (live)',
   yLabel: 'Accel (g)',
   series: [{ label: 'Accel (g)', color: '#3ecf6e' }],
   maxPoints: 500,
@@ -488,17 +577,177 @@ const logsumRpm = document.getElementById('logsum-rpm');
 const logsumAmp = document.getElementById('logsum-amp');
 const logsumPeriod = document.getElementById('logsum-period');
 const logsumPulses = document.getElementById('logsum-pulses');
+const logsumHarmonics = document.getElementById('logsum-harmonics');
+const logsumViewBtns = {
+  raw:  document.getElementById('logsum-view-raw'),
+  lp:   document.getElementById('logsum-view-lp'),
+  sync: document.getElementById('logsum-view-sync'),
+};
 
 // x = time (s), y = accel (g). BodeChart rather than RollingChart: this is a
 // static XY slice, and its wheel-zoom/drag-pan/data-cursor are exactly what a
 // student needs to zoom to 2-3 cycles and read a peak off precisely.
 const logsumChart = new BodeChart(document.getElementById('logsum-chart'), {
-  title: 'Accel vs. Time — gold lines are encoder pulses (1 per revolution)',
-  xLabel: 'Time (s, from capture start)',
+  title: 'Accel vs. Time',
+  xLabel: 'Time (s)',
   yLabel: 'Accel (g)',
 });
 
 let logsumPhaseDeg = NaN;   // the firmware's answer, held back until Reveal
+let lastLogsum = null;      // last capture, kept so the view can be re-rendered
+// 'raw' | 'lp' | 'sync'. Defaults to the low-pass: the raw ADXL trace carries
+// broadband noise across the ADS1220's whole ~1165 Hz band, which makes picking
+// a trough by eye genuinely hard, and every view here is phase-preserving so
+// the smoothing can't distort the measurement. Raw stays one click away.
+let logsumView = 'lp';
+// Capture facts (sample count, rate, window) -- constant for a given capture.
+// renderLogsumTrace() appends what the current view did to it.
+let logsumBaseStatus = '';
+// How many copies of the averaged revolution the sync view lays out. One lone
+// cycle is technically all the information there is, but it gives the student a
+// single pulse->trough interval floating in isolation; a handful of repeats
+// reads like the raw trace they already know, so the same measurement (pick a
+// gold line, find the next trough) transfers over directly.
+const LOGSUM_SYNC_REVS = 6;
+
+// Pick `revs` consecutive revolutions from the middle of the capture, anchored
+// on encoder pulses, so the raw and low-pass views span exactly what the sync
+// view synthesises. Middle rather than start for a reason: filtfilt settles at
+// both ends of the record, and taking the centre keeps those edge transients
+// off screen. (Filtering always runs on the FULL record -- only the display is
+// windowed -- so the trace shown is never filtered from a truncated buffer.)
+// Asks for `wantRevs` but settles for however many the capture actually holds,
+// so a slow shaft (whose revolutions are long enough that only one or two fit
+// in the shipped window) degrades to showing those rather than falling out of
+// step with the other views. Returns null only if there isn't one whole
+// revolution to show.
+function logsumWindowRevs(pulses, tFirst, tLast, wantRevs) {
+  const inside = pulses.filter((p) => p >= tFirst && p <= tLast);
+  const totalRevs = inside.length - 1;
+  if (totalRevs < 1) return null;
+  const revs = Math.min(wantRevs, totalRevs);
+  const start = Math.max(0, Math.min(totalRevs - revs, Math.round((totalRevs - revs) / 2)));
+  return { start: inside[start], end: inside[start + revs], revs, totalRevs };
+}
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// Both filters keep peak TIMES exact, which is the only reason either is
+// allowed near this screen -- the whole exercise is a timing measurement.
+//   lp   -- zero-phase Butterworth. Cutoff is set in HARMONICS of shaft speed,
+//           not Hz, because the tone being measured moves with RPM: a fixed Hz
+//           cutoff that works at 300 RPM would sit below the fundamental at
+//           3400. Keeping ~5 harmonics preserves the waveform's shape while
+//           discarding the decade of band above it that is pure noise.
+//   sync  -- time-synchronous average over the encoder pulses (see
+//           syncAverage): collapses the window to one clean revolution.
+function renderLogsumTrace() {
+  if (!lastLogsum) return;
+  const s = lastLogsum;
+  const t = s.samples.map((p) => p.time_s);
+  const y = s.samples.map((p) => p.accel_g);
+  const shaftHz = s.rpmAvg > 0 ? s.rpmAvg / 60 : 0;
+  const harmonics = clamp(Number(logsumHarmonics.value), 2, 40);
+
+  // The harmonics cutoff applies to BOTH filtered views (see the sync branch).
+  logsumHarmonics.disabled = logsumView === 'raw';
+  const cutoffHz = harmonics * shaftHz;
+  const bandLimited = shaftHz > 0 ? lowpassFiltfilt(y, s.actualSps, cutoffHz) : y;
+
+  // Resolved once and shared by all three views -- it decides both how many
+  // revolutions the raw/low-pass traces are windowed to and how many times the
+  // sync view repeats its averaged revolution, which is what keeps the x-axis
+  // identical when switching between them.
+  const win = logsumWindowRevs(s.pulses, t[0], t[t.length - 1], LOGSUM_SYNC_REVS);
+  const shownRevs = win ? win.revs : 1;
+
+  let note = '';
+  if (logsumView === 'sync') {
+    // Average the BAND-LIMITED trace, not the raw one. Synchronous averaging
+    // rejects noise but not rotation-locked harmonics -- an 8x component is
+    // exactly as synchronous as the 1x, so it survives at full strength and
+    // leaves a ripple that makes the trough harder to pick out, which is the
+    // opposite of the point. Low-passing first removes the harmonics, the
+    // averaging then removes the noise, and the two are independent wins.
+    // Both stages are phase-preserving, so the trough still doesn't move.
+    const avg = syncAverage(t, bandLimited, s.pulses, { repeats: shownRevs });
+    if (avg) {
+      logsumChart.title =
+        `Accel vs. Time — ${plural(avg.revolutions, 'revolution')} averaged, shown ${avg.repeats}×`;
+      logsumChart.xLabel = 'Time (s, from an encoder pulse)';
+      logsumChart.setSeries('accel', avg.time.map((x, i) => ({ x, y: avg.accel[i] })),
+                            '#3ecf6e', 'Accel (g)', { markers: false });
+      // Every gold line is an encoder pulse by construction -- each marks one
+      // averaged revolution, so any pulse->trough pair reads the same phase.
+      logsumChart.setVLines(avg.pulseTimes);
+      logsumChart.resetZoom();
+      // Only claim a noise win when there was actually something to average:
+      // a lone revolution is just itself, repeated.
+      note = avg.revolutions > 1
+        ? `Sync-averaged over ${plural(avg.revolutions, 'revolution')} ` +
+          `(~${Math.sqrt(avg.revolutions).toFixed(1)}× less noise), band-limited to ` +
+          `${harmonics}× shaft speed, repeated ${avg.repeats}× — every cycle is identical, ` +
+          `so measure any pulse → next trough.`
+        : `Only one complete revolution in this window — nothing to average, ` +
+          `so this is that revolution band-limited to ${harmonics}× shaft speed.`;
+      logsumStatus.textContent = `${logsumBaseStatus} ${note}`;
+      return;
+    }
+    // Fewer than one whole revolution in the window (very low RPM, or a stalled
+    // rotor) -- nothing to average, so show raw rather than an empty plot.
+    note = 'Not enough complete revolutions to sync-average — showing raw.';
+  }
+
+  let plotted = y;
+  if (logsumView === 'lp' && shaftHz > 0) {
+    plotted = bandLimited;
+    note = `Low-pass ${cutoffHz.toFixed(0)} Hz (${harmonics}× shaft speed), zero-phase.`;
+  } else if (logsumView === 'lp') {
+    note = 'No measurable RPM — showing raw.';
+  }
+
+  // Show the same span the sync view does -- same number of revolutions, same
+  // pulse-anchored origin -- so switching between the three changes the TRACE
+  // and nothing else. Without this the eye has to re-find its place on a
+  // different time axis every time, which defeats comparing them.
+  logsumChart.title = 'Accel vs. Time';
+  const pts = [];
+  if (win) {
+    for (let i = 0; i < t.length; i++) {
+      if (t[i] >= win.start && t[i] <= win.end) pts.push({ x: t[i] - win.start, y: plotted[i] });
+    }
+    logsumChart.xLabel = 'Time (s, from an encoder pulse)';
+    logsumChart.setVLines(s.pulses.filter((p) => p >= win.start && p <= win.end)
+                                  .map((p) => p - win.start));
+    if (win.revs < win.totalRevs) {
+      note = `${note} Showing ${win.revs} of ${plural(win.totalRevs, 'revolution')}.`.trim();
+    }
+  } else {
+    // Not enough whole revolutions to window (very low RPM) -- show everything.
+    for (let i = 0; i < t.length; i++) pts.push({ x: t[i], y: plotted[i] });
+    logsumChart.xLabel = 'Time (s)';
+    logsumChart.setVLines(s.pulses);
+  }
+  logsumChart.setSeries('accel', pts, '#3ecf6e', 'Accel (g)', { markers: false });
+  logsumChart.resetZoom();
+  logsumStatus.textContent = `${logsumBaseStatus} ${note}`.trim();
+}
+
+function setLogsumView(view) {
+  if (logsumView === view) return;
+  logsumView = view;
+  for (const [k, btn] of Object.entries(logsumViewBtns)) {
+    btn.classList.toggle('active', k === view);
+    btn.setAttribute('aria-pressed', String(k === view));
+  }
+  renderLogsumTrace();
+}
+for (const [k, btn] of Object.entries(logsumViewBtns)) {
+  btn.addEventListener('click', () => setLogsumView(k));
+}
+// 'change' not 'input' -- re-filtering ~2330 samples per keystroke is wasted work.
+// Applies to the sync view too: it band-limits before averaging.
+logsumHarmonics.addEventListener('change', () => { if (logsumView !== 'raw') renderLogsumTrace(); });
 
 btnLogsum.addEventListener('click', async () => {
   btnLogsum.disabled = true;
@@ -506,7 +755,9 @@ btnLogsum.addEventListener('click', async () => {
   logsumChart.resize();
   logsumChart.clear();
   logsumChart.setVLines([]);
-  logsumStatus.textContent = 'Recording 5 s at full rate (RPM held)… then transferring 1 s.';
+  lastLogsum = null;          // don't let a view switch re-render the previous capture
+  logsumBaseStatus = '';
+  logsumStatus.textContent = 'Recording 5 s at full rate…';
   logsumAnswer.textContent = '';
   logsumAnswerRaw.textContent = '';
   logsumAnswerNote.hidden = true;
@@ -527,11 +778,7 @@ btnCloseLogsum.addEventListener('click', () => closeModal('modal-logsum'));
 client.addEventListener('logsum-result', (e) => {
   const s = e.detail;
   logsumPhaseDeg = s.phaseDeg;
-
-  logsumChart.setSeries('accel', s.samples.map((p) => ({ x: p.time_s, y: p.accel_g })),
-                        '#3ecf6e', 'Accel (g)', { markers: false });
-  logsumChart.setVLines(s.pulses);
-  logsumChart.resetZoom();
+  lastLogsum = s;
 
   const T_ms = s.rpmAvg > 0 ? 60000 / s.rpmAvg : NaN;
   logsumRpm.textContent = s.rpmAvg.toFixed(1);
@@ -539,10 +786,11 @@ client.addEventListener('logsum-result', (e) => {
   logsumPeriod.textContent = isFinite(T_ms) ? T_ms.toFixed(1) : '—';
   logsumPulses.textContent = String(s.pulses.length);
 
-  logsumStatus.textContent =
-    `Showing ${s.samples.length} samples (${(s.samples.length / s.actualSps).toFixed(2)} s ` +
-    `of the ${s.durationS.toFixed(0)} s capture, from t=${s.windowStartS.toFixed(2)} s) ` +
-    `at ${s.actualSps.toFixed(0)} SPS. Live stream has resumed.`;
+  logsumBaseStatus =
+    `${s.samples.length} samples @ ${s.actualSps.toFixed(0)} SPS ` +
+    `(${(s.samples.length / s.actualSps).toFixed(2)} s of ${s.durationS.toFixed(0)} s, ` +
+    `from t=${s.windowStartS.toFixed(2)} s).`;
+  renderLogsumTrace();   // draws the trace and appends what it did to the status
 
   btnLogsumReveal.disabled = !isFinite(s.phaseDeg);
   btnLogsum.disabled = client.mode !== 'live';
@@ -694,7 +942,7 @@ const sweepChart = new BodeChart(document.getElementById('sweep-chart'), {
 // keeps runs comparable and stops a flat pre-resonance trace being blown up
 // into meaningless noise. refY marks the 90 deg resonance crossing.
 const sweepPhaseChart = new BodeChart(document.getElementById('sweep-phase-chart'), {
-  title: 'Response Phase vs. RPM (1×RPM, referenced to encoder)',
+  title: 'Response Phase vs. RPM',
   xLabel: 'RPM (measured)',
   yLabel: 'Phase lag (deg)',
   resonanceX: Number(sweepResonanceHz.value) * 60,
@@ -859,7 +1107,7 @@ btnSweepStart.addEventListener('click', async () => {
   currentSweepPoints = [];
   currentRunDamped = sweepDamped;
   btnSweepSave.disabled = true;
-  sweepStatus.textContent = `Sweeping ${currentRunDamped ? 'damped (r2)' : 'undamped (r)'}… (this takes a while -- points appear as each RPM settles)`;
+  sweepStatus.textContent = `Sweeping ${currentRunDamped ? 'damped (r2)' : 'undamped (r)'}…`;
   try {
     await client.runRpmSweep(currentRunDamped);
   } catch (err) {
@@ -998,7 +1246,7 @@ const btnBumpStop = document.getElementById('btn-bump-stop');
 const btnBumpSave = document.getElementById('btn-bump-save');
 const bumpStatus = document.getElementById('bump-status');
 const bumpTimeChart = new RollingChart(document.getElementById('bump-time-chart'), {
-  title: 'Bump Test — Vibration (Time Domain)',
+  title: 'Bump Test — Time Domain',
   yLabel: 'Accel (g)',
   series: [{ label: 'Accel (g)', color: '#3ecf6e' }],
   maxPoints: 40000, // one-shot bounded capture (<=15s @ ~2330 SPS), not a continuously-live feed
@@ -1041,7 +1289,7 @@ btnBumpStop.addEventListener('click', async () => {
 });
 
 client.addEventListener('bump-triggered', (e) => {
-  bumpStatus.textContent = `Triggered at ${e.detail.accelG.toFixed(3)} g -- capturing (please wait, no live plot until the transfer starts)…`;
+  bumpStatus.textContent = `Triggered at ${e.detail.accelG.toFixed(3)} g -- capturing…`;
   // The ~11k-row dump is about to arrive: accumulate points without a redraw
   // per row (see RollingChart.beginBatch). A throttled preview redraw happens
   // in bump-sample; the final full-resolution draw is in bump-result.
@@ -1122,7 +1370,7 @@ const FREEVIB_FMIN_HZ = 0.5;    // ignore sub-0.5 Hz drift when hunting the mode
 const FREEVIB_FFT_MAX_HZ = 15;  // display/search ceiling -- the rig rings ~2.5 Hz
 
 const freevibTimeChart = new RollingChart(document.getElementById('freevib-time-chart'), {
-  title: 'Free Vibration — Accel vs. Time (ring-down)',
+  title: 'Free Vibration — Ring-down',
   xLabel: 'Time (s)',
   yLabel: 'Accel (g)',
   series: [{ label: 'Accel (g)', color: '#3ecf6e' }],
@@ -1457,6 +1705,16 @@ client.addEventListener('mode', (e) => {
 
   btnRpmStart.disabled = sweep || !(idle || (live && !client.rpmActive));
   btnRpmStop.disabled = sweep || !client.rpmActive;
+  // The loop selector matters when idle (it picks what Start does) AND while
+  // live (it hands the running session over) -- but a sweep owns the motor, so
+  // it's locked there. Open loop is additionally gated on the board actually
+  // supporting `d <duty>`: firmware that predates it drops the command
+  // silently, so a live-looking slider that did nothing would be worse than a
+  // disabled button that says why.
+  segRpmClosed.disabled = sweep || !(idle || live);
+  segRpmOpen.disabled = sweep || !(idle || live) || !client.supportsOpenLoop;
+  segRpmOpen.title = client.supportsOpenLoop
+    ? '' : 'This PCB1 firmware has no open-loop support — re-flash it.';
   btnAccelStart.disabled = sweep || !(idle || (live && !client.vibActive));
   btnAccelStop.disabled = sweep || !client.vibActive;
   // Log Summary runs *inside* the live session (that's what keeps the shaft at

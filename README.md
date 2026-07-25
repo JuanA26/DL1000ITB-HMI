@@ -12,7 +12,8 @@ modules, so it can be hosted as-is on GitHub Pages later.
    **Skip — Demo Mode** to go straight to the dashboard with simulated data
    and no board attached (useful for UI/layout iteration).
 3. **Dashboard** — a persistent grid, not click-to-switch tabs: Apparatus
-   (reference images + condensed status), Motor RPM control, and Vibration/
+   (reference images + condensed status), Motor control (closed-loop RPM or
+   open-loop PWM duty, switchable while running), and Vibration/
    Accel data fill row 1 side by side, Stroboscope control, an Auxiliary
    panel (relay + serial log), and an Advanced Tests panel fill row 2.
    Motor and Accel are deliberately kept visible at the same time, not
@@ -60,6 +61,19 @@ Accel even though real hardware wouldn't have shown that gap — if a
 demo's cadence is ever copied from another mode again, double check the
 source mode's actual print/tick rate in `main.cpp` rather than assuming
 the old constant still applies.
+
+**A too-clean demo is a misleading demo.** `_demoLogSummary()` originally
+produced a pure sine with ±0.01 g of noise against a signal up to 0.9 g. That
+implied a trough you can always just read straight off — which the real rig does
+not give you — and it left the Log Summary's low-pass and sync-average views
+with nothing visible to do. It now carries ~0.05 g RMS broadband noise (a light
+fuzz at resonance, but enough to bury the ~0.06 g tone at low RPM, the same
+asymmetry that makes the firmware's 1× lock-in necessary) plus rotation-locked
+8×/11× harmonics — which are specifically what synchronous averaging *cannot*
+remove, and therefore the reason the sync view band-limits first. When adding a
+signal-conditioning feature, check the demo actually exercises it; a simulation
+tuned for a clean-looking screenshot will quietly hide the problem the feature
+exists to solve.
 
 ## Running locally
 
@@ -110,6 +124,30 @@ single line handler routes replies by their leading tag —
 `bump-sample`/`bump-result`, and `#`-status lines (`# idle`, `# sweep
 complete/aborted`, `# bump armed/triggered`) drive mode transitions. `app.js`
 consumes those same events it always did, so it barely changed.
+
+**Closed vs. open loop is a setting inside one session, not two modes.** The
+Motor panel's Loop selector switches between `t <rpm>` (PI+feedforward holds a
+target RPM) and `d <duty>` (the commanded 0-255 PWM goes straight to the
+motor). Both ride PCB1's single `live` session, which is what lets the selector
+be flipped **while the motor is running** — the shaft doesn't stop and the
+Accel panel, which shares that same session, never sees a gap. That live switch
+is the point: open loop sags under the reaction torque near resonance where the
+closed loop holds. In open loop the `R` row's target field is `nan` (there is no
+setpoint), so the panel shows a dash and the chart's Target trace breaks rather
+than drawing a fictitious line. The duty slider sends on `input` (throttled
+~80 ms) so dragging it is live; the RPM slider stays on `change`, since each new
+setpoint is a step the controller then has to settle.
+
+**Optional features are capability-gated, not version-gated.** Open loop is
+advertised by the firmware's `I,...` line as `openloop=1`; `connect()` waits for
+that line so `client.supportsOpenLoop` is settled before the UI configures
+itself, and the Open (PWM) button is **disabled with an explanatory tooltip** on
+firmware that predates it. A banner-version bump would have been too blunt here
+— adding a command breaks nothing for an older client, and the reverse mistake
+(new client, old board) just makes `live`'s digit-only retarget parser drop the
+`d` line: harmless, but *silent*, which is precisely what a greyed-out button
+fixes. Refusing the whole connection is reserved for changes like v1→v2's
+`strobe`, where misreading an argument ran the motor to full duty.
 
 **Relay state starts ON, and the board is the authority.** PCB1's `setup()`
 drives `PIN_RELAY` HIGH and `relaySet()` maps HIGH → on, so the board **boots
@@ -192,6 +230,53 @@ low-RPM normalisation, and worth pointing students at. A few degrees of
 disagreement against a hand reading is expected and worth saying out loud: a
 trough is flattest exactly where you're trying to read its position.
 `btn-logsum` is enabled only while `mode === 'live'`.
+
+### The three trace views
+
+The raw ADXL trace carries broadband noise across the ADS1220's whole ~1165 Hz
+band, which makes picking a trough by eye genuinely hard. The **Trace** selector
+offers three views of the same captured rows (all client-side — the firmware's
+lock-in answer is computed independently of whatever is displayed):
+
+- **Raw** — exactly what the board sent.
+- **Low-pass** — zero-phase Butterworth (`js/filter.js`). Its cutoff is set in
+  **harmonics of shaft speed, not Hz**, because the tone being measured moves
+  with RPM: a fixed 25 Hz cutoff is right at 300 RPM but sits *below the
+  fundamental* at 3400. The default 5 harmonics keeps the waveform's shape and
+  discards the decade of pure-noise band above it. Below ~3 the filter starts
+  attenuating the 1× response itself (timing stays exact; amplitude reads low),
+  hence the minimum of 2.
+- **Sync average** — time-synchronous averaging against the encoder pulses
+  (`syncAverage`). Cut the record at every pulse, resample each revolution onto
+  a common angular grid, average. Rotation-locked content adds coherently;
+  noise falls as 1/√revolutions (~4.4× over a 1 s window at 1200 RPM) at no
+  cost in bandwidth. Per-revolution normalisation makes it order tracking, so
+  small speed variations realign rather than smear.
+
+**Everything here is phase-preserving**, which is the only reason any of it is
+allowed on this screen: the exercise is a *timing* measurement, so a causal
+filter would silently corrupt the very quantity being taught. `filtfilt` is
+zero-phase by construction, and every averaged segment starts on its own pulse,
+so the output's t=0 *is* the trigger.
+
+**Sync average band-limits first, and that isn't optional.** Synchronous
+averaging rejects everything *not* locked to rotation — but an 8× harmonic is
+exactly as synchronous as the 1×, so it survives at full strength. On hardware
+that left a ripple which made the trough *harder* to find, not easier: measured
+against a synthetic rotor, averaging the raw trace left 0.0053 g of residual
+ripple, versus 0.0006 g when the same trace was low-passed first (8.7× cleaner),
+and the trough reading improved from 198.8° to 188.1° against a true 180°. The
+two stages remove different things — the filter kills harmonics, the averaging
+kills noise — so the Harmonics control applies to both views.
+
+**All three share one window.** The averaged revolution is tiled 6× and the raw
+/ low-pass traces are windowed to the same 6 revolutions, anchored on a pulse
+and taken from the *middle* of the capture (filtering runs on the full record,
+so `filtfilt`'s edge transients stay off screen). Switching views therefore
+changes the trace and nothing else — same span, same pulse lines, same origin.
+The count adapts down when a slow shaft doesn't fit 6 revolutions in the shipped
+window, and with only one revolution available the status says there was nothing
+to average rather than advertising a noise reduction it didn't perform.
 
 Chart notes: it reuses `BodeChart` (x = time, y = accel) for its wheel-zoom /
 drag-pan / data-cursor — a student needs to zoom to 2-3 cycles to read a trough
@@ -283,6 +368,30 @@ Two modes:
   at a time (oscilloscope roll mode) instead of resetting/jumping back to
   0 every `windowSeconds` — deliberately chosen over a reset-and-refill
   sweep to avoid a jarring, sudden trace jump every few seconds.
+
+### Plot-frame geometry (`layoutChartFrame`)
+
+`RollingChart` and `BodeChart` share one layout helper, so a fix to either
+axis-margin problem lands on every chart at once. Two decisions there are worth
+knowing, because the obvious implementation of each is wrong:
+
+- **The left margin is measured, not fixed.** A hardcoded 44 px let a wide tick
+  label ("200.0") run straight through the rotated y-axis title.
+- **…but it's measured against a fixed worst-case template, not the labels
+  currently on screen.** Sizing it to the live labels reintroduced a subtler
+  problem: an autoscaling axis changes its widest label as data arrives ("0.40"
+  gains a minus sign the first time the trace dips negative; "500.0" becomes
+  "2000" during spin-up), so the whole plot box shifted a few pixels every time
+  the axis rescaled — a constant squish/expand while streaming. The template
+  covers every string `formatTick` can emit, so the box is pinned for the whole
+  run, and stacked pairs meant to be read against each other (RPM/Duty, and the
+  sweep's amplitude/phase) share one margin and line up.
+
+`niceTicks` nudges by 1e-9 before rounding outward. Data whose extreme lands
+*exactly* on a tick rarely divides exactly in floating point — `0.3 / 0.1` is
+`3.0000000000000004`, so a bare `Math.ceil` jumped to 4 and the axis gained a
+whole empty step (a 0–0.3 s trace drawn on a 0–0.4 s axis). The error is ~1e-16
+relative, so the tolerance can't swallow a real data point.
 
 `../Matlab/BumpTestESP32.m` was a MATLAB client for mode `b` (bump test),
 built *before* `_parseBumpLine()`/`runBumpTest()` were added to
@@ -502,3 +611,16 @@ verified in demo mode.
   read them back via a `<input type="file">` picker — there's no
   auto-discovery of previously-saved runs, the user has to know where
   they downloaded them.
+- **Open-loop motor control has not run on hardware.** It is compile-clean and
+  demo-verified only; the board must be re-flashed for it to appear at all
+  (until then the Open (PWM) button stays greyed out — that's the capability
+  flag working, not a fault). The specific thing to check on the bench is the
+  *bumpless* handover: at a steady open-loop speed, switch to closed loop at
+  the same RPM and confirm the duty doesn't jump or dip, then the reverse.
+- The Log Summary's Sync average shows an averaged revolution **repeated**, not
+  six distinct ones. Every cycle is identical by construction. That's what makes
+  the trough easy to read, but it also means revolution-to-revolution
+  variability — which is real information, e.g. a rotor that hunts — is
+  invisible in that view. Raw is one click away and shows it.
+- Log Summary has no **Save Run**, unlike the Sweep, Bump and Free Vibration
+  modals, so a capture can't be re-examined offline or kept as a record.

@@ -9,7 +9,8 @@
 //   Commands (client -> PCB1), one line each, at HMI idle:
 //     live <rpm> | strobe <targetRpm> <delta> | sweep <0|1> | bump <thr> <dur> |
 //     freevib <dur> | accelcheck | relay <0|1> | stop (x) | id
-//   While a stream runs: `t <rpm>` (retarget, live only), `stop` / `x`.
+//   While a stream runs: `t <rpm>` (closed-loop retarget, live only),
+//     `d <duty>` (open-loop PWM 0-255, live only), `stop` / `x`.
 //   Responses (PCB1 -> client), tag is the first comma-field:
 //     R,t_ms,target,measured,duty,raw        (RPM control row)
 //     V,t_ms,accel_g                         (decimated vibration row)
@@ -70,9 +71,15 @@ export class PCB1Client extends EventTarget {
     // handling and _bump.
     this._frame = null;
     this._bump = null;
+    // Parsed `I,k=v,...` capability line, or null until the board sends one.
+    // Gates optional features the firmware may predate -- see supportsOpenLoop.
+    this._caps = null;
     this._demo = false;
     this._demoTimer = null;
     this._demoTargetRpm = 0;
+    // Demo mirror of the firmware's open-loop state (see runHmiLive in main.cpp).
+    this._demoOpenLoop = false;
+    this._demoOpenDuty = 0;
 
     this.link.addEventListener('line', (e) => this._onLine(e.detail));
     this.link.addEventListener('close', () => this._setMode('disconnected'));
@@ -85,6 +92,16 @@ export class PCB1Client extends EventTarget {
   // started the shared session.
   get rpmActive() { return this._mode === 'live' && this._rpmWanted; }
   get vibActive() { return this._mode === 'live' && this._vibWanted; }
+
+  // Whether this board's `live` accepts `d <duty>` (open-loop PWM). Advertised
+  // by the firmware's `I,...` line as `openloop=1`. Deliberately STRICT when
+  // unknown: firmware that predates the feature parses `d 120` as an unknown
+  // line and drops it silently, so a permissive default would give a slider
+  // that looks live and does nothing. Greying the control out says so instead.
+  get supportsOpenLoop() { return this._demo || !!(this._caps && this._caps.openloop === '1'); }
+  // Max PWM duty the board accepts (its `I,...` dutymax, 255 on every build so
+  // far). Falls back to the canonical 255 rather than 0 so the UI stays usable.
+  get dutyMax() { return Number(this._caps?.dutymax) || 255; }
 
   _setMode(m) {
     if (this._mode === m) { this._notifyMode(); return; }
@@ -172,6 +189,13 @@ export class PCB1Client extends EventTarget {
           `a target RPM, which v1 would clamp to full duty.`
         );
       }
+      // The firmware prints its `I,...` capability line immediately after the
+      // banner. Waiting for it here (rather than letting it land whenever)
+      // means supportsOpenLoop is already settled by the time connect()
+      // resolves and the UI configures itself. Absent on older firmware, hence
+      // the swallowed timeout -- _caps just stays null and the optional
+      // controls stay disabled.
+      await this._waitForLine(/^I,/, 1500).catch(() => {});
     } finally {
       this._resetStreams();
       this._setMode('idle');
@@ -241,8 +265,39 @@ export class PCB1Client extends EventTarget {
 
   async setTargetRpm(targetRpm) {
     if (this._mode !== 'live') throw new Error('Not running target RPM control.');
-    if (this._demo) { this._demoTargetRpm = targetRpm; return; }
+    // Also the switch back to closed loop if the session is currently open-loop
+    // (the firmware treats a retarget that way -- see runHmiLive).
+    if (this._demo) { this._demoTargetRpm = targetRpm; this._demoOpenLoop = false; return; }
     await this.link.write(`t ${targetRpm}\n`);
+  }
+
+  // ---- Open loop: drive the PWM duty (0-255) directly, no controller ----
+  // Same `live` session as startTargetRpmControl() -- open vs closed loop is a
+  // setting WITHIN the session, not a separate mode, so the Accel panel keeps
+  // streaming across a switch and the shaft doesn't stop. Starting here just
+  // opens the session with the motor idle, then sends the duty.
+  async startOpenLoopDuty(initialDuty) {
+    if (this._mode === 'live') {
+      this._rpmWanted = true;
+      this._notifyMode();
+      return this.setOpenLoopDuty(initialDuty);
+    }
+    await this._ensureIdle();
+    this._rpmWanted = true;
+    this._vibWanted = false;
+    if (this._demo) return this._demoStartLive(0, initialDuty);
+    await this.link.write('live 0\n');
+    this._setMode('live');
+    await this.link.write(`d ${initialDuty}\n`);
+  }
+
+  // Live duty adjustment (the slider drags through this). Throttling is the
+  // caller's job -- see app.js's sendDutyThrottled.
+  async setOpenLoopDuty(duty) {
+    if (this._mode !== 'live') throw new Error('Not running the motor.');
+    if (!this.supportsOpenLoop) throw new Error('This PCB1 firmware has no open-loop support -- re-flash it.');
+    if (this._demo) { this._demoOpenLoop = true; this._demoOpenDuty = duty; return; }
+    await this.link.write(`d ${duty}\n`);
   }
 
   // Stops the RPM panel's own data. If the Accel panel still wants the shared
@@ -253,7 +308,7 @@ export class PCB1Client extends EventTarget {
     if (this._mode !== 'live') return;
     this._rpmWanted = false;
     if (this._vibWanted) {
-      if (this._demo) { this._demoTargetRpm = 0; this._notifyMode(); return; }
+      if (this._demo) { this._demoTargetRpm = 0; this._demoOpenLoop = false; this._notifyMode(); return; }
       await this.setTargetRpm(0);
       this._notifyMode();
       return;
@@ -461,9 +516,19 @@ export class PCB1Client extends EventTarget {
         }
         break;
       }
-      case 'I':
+      case 'I': {
+        // `I,fw=pcb1,vibsps=...,openloop=1` -- capability/info line, emitted
+        // right after the ready banner (and on every `id`). Parsed into a plain
+        // k->v map; unknown keys are kept, so a firmware that adds a capability
+        // needs no change here (see supportsOpenLoop).
+        this._caps = Object.fromEntries(
+          p.map((kv) => { const i = kv.indexOf('='); return i < 0 ? [kv, ''] : [kv.slice(0, i), kv.slice(i + 1)]; })
+        );
+        this.dispatchEvent(new CustomEvent('capabilities', { detail: { ...this._caps } }));
+        break;
+      }
       default:
-        break; // info line / unknown tag -- already logged
+        break; // unknown tag -- already logged
     }
   }
 
@@ -625,8 +690,12 @@ export class PCB1Client extends EventTarget {
     return rpm <= 0 ? 0 : Math.min(255, 35 + rpm / 13.5);
   }
 
-  _demoStartLive(initialTargetRpm) {
+  // openLoopDuty !== null starts the session in open loop (see
+  // startOpenLoopDuty); otherwise it's closed-loop on initialTargetRpm.
+  _demoStartLive(initialTargetRpm, openLoopDuty = null) {
     this._demoTargetRpm = initialTargetRpm;
+    this._demoOpenLoop = openLoopDuty !== null;
+    this._demoOpenDuty = openLoopDuty ?? 0;
     this._setMode('live');
     let t = 0;
     let simRpm = 0;
@@ -639,13 +708,19 @@ export class PCB1Client extends EventTarget {
         this.dispatchEvent(new CustomEvent('vibration-live-sample', { detail: { time_ms: t, accel_g: g } }));
       }
       if (this._rpmWanted && t % 20 === 0) {
-        simRpm += (this._demoTargetRpm - simRpm) * 0.25;
+        // Open loop: the duty is what's commanded and the speed is whatever the
+        // motor curve gives for it (no setpoint, hence the NaN target -- same
+        // convention the firmware's R row uses). Closed loop: the speed chases
+        // the target and the duty is whatever it takes.
+        const open = this._demoOpenLoop;
+        const settling = open ? this._demoRpmForDuty(this._demoOpenDuty) : this._demoTargetRpm;
+        simRpm += (settling - simRpm) * 0.25;
         const raw = Math.max(0, simRpm + (Math.random() - 0.5) * 40);
         const filtered = Math.max(0, simRpm + (Math.random() - 0.5) * 8);
         this.dispatchEvent(new CustomEvent('rpm-sample', {
           detail: {
-            time_ms: t, target_rpm: this._demoTargetRpm, rpm: filtered,
-            duty: this._demoDutyForRpm(filtered), raw_rpm: raw,
+            time_ms: t, target_rpm: open ? NaN : this._demoTargetRpm, rpm: filtered,
+            duty: open ? this._demoOpenDuty : this._demoDutyForRpm(filtered), raw_rpm: raw,
           },
         }));
       }
@@ -658,7 +733,7 @@ export class PCB1Client extends EventTarget {
   // an answer to find. Mirrors the firmware in emitting RAW phase (the lag
   // plus a constant pretend mounting offset).
   _demoLogSummary(durationS) {
-    const rpm = this._demoTargetRpm || 1200;
+    const rpm = (this._demoOpenLoop ? this._demoRpmForDuty(this._demoOpenDuty) : this._demoTargetRpm) || 1200;
     const f = rpm / 60;
     const sps = 2330;
     const showS = 1.0;
@@ -676,10 +751,29 @@ export class PCB1Client extends EventTarget {
 
     // Pulses at t_k; the accel peak sits rawPhase degrees (of one rev) later.
     const lagS = (rawPhase / 360) * (1 / f);
+    // Broadband sensor noise. Sized (~0.05 g RMS) to match what makes the real
+    // rig's raw trace hard to read by hand -- it's a light fuzz next to the ~0.9 g
+    // response at resonance but buries the ~0.06 g tone at low RPM, which is the
+    // same asymmetry that makes the firmware's 1x lock-in necessary in the first
+    // place. The old +/-0.01 here was clean enough to be misleading: it implied a
+    // trough you can always just read off, and left the Log Summary's low-pass /
+    // sync-average views with nothing visible to do.
+    const NOISE_PP_G = 0.18;
+    // Rotation-locked higher harmonics, as a real rotor has. These matter for
+    // more than realism: they are exactly what SYNCHRONOUS AVERAGING cannot
+    // remove (an 8x component is as synchronous as the 1x, so it averages
+    // coherently and survives), which is why the Log Summary band-limits before
+    // averaging. A pure-sine demo would hide that entirely and make the
+    // harmonics control look inert.
+    const harmonic = (k, relAmp, phase) => (t) => amp * relAmp * Math.cos(2 * Math.PI * k * f * (t - lagS) + phase);
+    const harmonics = [harmonic(8, 0.12, 0.7), harmonic(11, 0.09, 2.1)];
     const samples = [];
     for (let i = 0; i < n; i++) {
       const t = t0 + i / sps;
-      samples.push({ time_s: t, accel_g: amp * Math.cos(2 * Math.PI * f * (t - lagS)) + (Math.random() - 0.5) * 0.02 });
+      const g = amp * Math.cos(2 * Math.PI * f * (t - lagS))
+              + harmonics.reduce((s, h) => s + h(t), 0)
+              + (Math.random() - 0.5) * NOISE_PP_G;
+      samples.push({ time_s: t, accel_g: g });
     }
     const pulses = [];
     for (let k = Math.ceil(t0 * f); k / f <= t0 + showS; k++) {

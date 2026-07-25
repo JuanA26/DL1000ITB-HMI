@@ -404,6 +404,10 @@ body {
 }
 .panel-hint { color: var(--text-dim); font-size: 0.8rem; margin: 0 0 0.75rem; }
 .panel-status { color: var(--text-dim); font-size: 0.85rem; min-height: 1.2em; }
+/* One-line caption directly above a plot: how to drive the data cursor, plus
+   whatever that particular plot's markers mean. Quieter and tighter than
+   .panel-hint so it reads as part of the chart rather than body copy. */
+.chart-tip { color: var(--text-dim); font-size: 0.72rem; opacity: 0.85; margin: 0 0 0.3rem; }
 
 .metric-row { display: flex; gap: 1.5rem; margin-bottom: 0.75rem; }
 .metric { display: flex; flex-direction: column; }
