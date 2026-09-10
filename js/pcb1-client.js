@@ -387,12 +387,12 @@ export class PCB1Client extends EventTarget {
 
   // ---- `gap <lo> <hi>`: move the undamped sweep's no-dwell gap ----
   // Only meaningful for `sweep 0` / mode r -- the damped grid has no gap (see
-  // supportsGapAdjust). Firmware default is 1325-1345 RPM; this is for setups
+  // supportsGapAdjust). Firmware default is 1325-1350 RPM; this is for setups
   // where the rig actually goes unstable somewhere else.
   // Resolves { lo, hi } (the firmware-confirmed edges) on success, or rejects
   // with the firmware's reason (lo>=hi, span too small, outside the fine band)
   // on failure -- the gap is left UNCHANGED in that case. Session-scoped on
-  // the firmware: a reboot/reconnect resets it back to 1325-1345, so re-apply
+  // the firmware: a reboot/reconnect resets it back to 1325-1350, so re-apply
   // after reconnecting if it matters.
   async setSweepGap(loRpm, hiRpm) {
     await this._ensureIdle();
@@ -414,7 +414,7 @@ export class PCB1Client extends EventTarget {
   // ---- `gap` (no args): read the current no-dwell gap without changing it ----
   async getSweepGap() {
     await this._ensureIdle();
-    if (this._demo) return this._demoGap || { lo: 1325, hi: 1345 };
+    if (this._demo) return this._demoGap || { lo: 1325, hi: 1350 };
     this._setMode('busy');
     await this.link.write('gap\n');
     try {

@@ -1056,7 +1056,7 @@ let currentRunDamped = false;
 // ---- No-dwell gap (undamped sweep only -- mode r / `sweep 0`) ----
 // Lets a particular setup's actual instability band be dialled in from the
 // dashboard rather than re-flashing, when it differs from the firmware
-// default (1325-1345) -- see `gap <lo> <hi>` in HMI_PROTOCOL.md. `lastKnownIdle`
+// default (1325-1350) -- see `gap <lo> <hi>` in HMI_PROTOCOL.md. `lastKnownIdle`
 // mirrors the 'mode' event's `idle` flag so the damping-case toggle (which
 // fires with no 'mode' event of its own) can re-gate the row too. Declared
 // (and initialised) before renderSweepMode()'s first call below, which reaches
@@ -1202,10 +1202,10 @@ function resonanceFromPhase(points) {
       const t = (90 - pts[i - 1].y) / (pts[i].y - pts[i - 1].y);
       const rpm = pts[i - 1].x + t * (pts[i].x - pts[i - 1].x);
       // How far apart the straddling points are: on the undamped beam the
-      // crossing can fall inside the sweep's no-dwell gap (default 1325-1345,
+      // crossing can fall inside the sweep's no-dwell gap (default 1325-1350,
       // runtime-adjustable via `gap <lo> <hi>` -- see app.js's gap controls),
       // and interpolating across it is much cruder than across a 5 RPM fine
-      // step. Fine-band steps are 5 RPM, the default gap spans 20, so 10
+      // step. Fine-band steps are 5 RPM, the default gap spans 25, so 10
       // separates them -- see the `> 10` check below. A gap widened well past
       // the default via `gap` could still slip under this fixed threshold;
       // it's a heuristic, not a hard guarantee.

@@ -465,7 +465,7 @@ accordingly:
 - **Undamped** (`sweep 0`, test-mode **`r`**) — the gapped sweep: identical
   `driveToRpmAndCaptureAdaptive` per-point core plus `buildSweepGrid` /
   `buildReverseSweepOrder` / `planSweepPoint`, so it gets the (by default
-  1325-1345, see below) no-dwell gap, **reverse-cycle traversal** (ascend to
+  1325-1350, see below) no-dwell gap, **reverse-cycle traversal** (ascend to
   the gap's lower edge, jump to max RPM, then descend the super-resonance
   grid to dodge Sommerfeld capture) **and** the fine-band early-exit disable.
 - **Damped** (`sweep 1`, test-mode **`r2`**) — the full sweep: the
@@ -507,7 +507,7 @@ a "No-dwell gap (RPM)" row (two number inputs + **Set Gap**) sends the
 firmware's `gap <lo> <hi>` command (`client.setSweepGap()`,
 `HMI_PROTOCOL.md` §3.1) before the next undamped run — for a setup where the
 rig's actual instability band sits somewhere other than the bench-validated
-1325-1345 default (a different unbalance mass or mount stiffness can shift
+1325-1350 default (a different unbalance mass or mount stiffness can shift
 it). The row is
 greyed out while a run is in progress, while **Damped** is selected (the
 damped grid has no gap), or on firmware that predates the feature
@@ -516,7 +516,7 @@ STRICT-when-unknown pattern as `supportsOpenLoop`). A rejected pair (outside
 1285-1375 RPM, or `lo >= hi`) is reported inline and leaves the previous gap in
 effect; on success the two fields are overwritten with the firmware's
 confirmed edges. Not persisted on the firmware side — a reboot/reconnect
-resets it to 1325-1345, so re-apply it after reconnecting if the setup still
+resets it to 1325-1350, so re-apply it after reconnecting if the setup still
 needs it.
 
 *(Mode-name trap when reading older material: the firmware's original `r` was
@@ -553,7 +553,7 @@ things worth knowing about how it's rendered:
   crossing line. Wheel-zoom still overrides; double-click returns here.
 
 On the undamped beam the crossing usually lands inside the sweep's (default)
-1325-1345 no-dwell gap, so it's interpolated across ~20 RPM — the status line says so
+1325-1350 no-dwell gap, so it's interpolated across ~25 RPM — the status line says so
 rather than quoting false precision. `PHASE_ZERO_MAX_RPM` /
 `PHASE_MIN_TONE_RATIO` are mirrored as `RSWEEP_PHASE_*` in
 `../../Embedded - fin/TA - PCB1/PlotVibrationLog.m` so both hosts normalise
