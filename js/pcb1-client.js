@@ -107,6 +107,13 @@ export class PCB1Client extends EventTarget {
   // far). Falls back to the canonical 255 rather than 0 so the UI stays usable.
   get dutyMax() { return Number(this._caps?.dutymax) || 255; }
 
+  // Whether this board's undamped sweep (mode r / `sweep 0`) accepts the
+  // `gap <lo> <hi>` command to move its no-dwell gap. Advertised by the
+  // firmware's `I,...` line as `gapadj=1`, same STRICT-when-unknown reasoning
+  // as supportsOpenLoop: older firmware silently drops an unrecognised `gap`
+  // line, so the UI should grey the control out rather than pretend it works.
+  get supportsGapAdjust() { return this._demo || !!(this._caps && this._caps.gapadj === '1'); }
+
   _setMode(m) {
     if (this._mode === m) { this._notifyMode(); return; }
     this._mode = m;
@@ -376,6 +383,47 @@ export class PCB1Client extends EventTarget {
     if (this._demo) return this._demoRunRpmSweep();
     this._setMode('sweep');
     await this.link.write(`sweep ${damped ? 1 : 0}\n`);
+  }
+
+  // ---- `gap <lo> <hi>`: move the undamped sweep's no-dwell gap ----
+  // Only meaningful for `sweep 0` / mode r -- the damped grid has no gap (see
+  // supportsGapAdjust). Firmware default is 1325-1345 RPM; this is for setups
+  // where the rig actually goes unstable somewhere else.
+  // Resolves { lo, hi } (the firmware-confirmed edges) on success, or rejects
+  // with the firmware's reason (lo>=hi, span too small, outside the fine band)
+  // on failure -- the gap is left UNCHANGED in that case. Session-scoped on
+  // the firmware: a reboot/reconnect resets it back to 1325-1345, so re-apply
+  // after reconnecting if it matters.
+  async setSweepGap(loRpm, hiRpm) {
+    await this._ensureIdle();
+    if (this._demo) { this._demoGap = { lo: loRpm, hi: hiRpm }; return { lo: loRpm, hi: hiRpm }; }
+    this._setMode('busy');
+    await this.link.write(`gap ${loRpm} ${hiRpm}\n`);
+    try {
+      const line = await this._waitForLine(/^(# gap set |!,badgap,)/, 3000);
+      if (line.startsWith('!,badgap,')) {
+        throw new Error(line.split(',').slice(2).join(',').trim() || 'rejected by firmware');
+      }
+      const m = line.match(/lo=(-?[\d.]+)\s+hi=(-?[\d.]+)/);
+      return m ? { lo: Number(m[1]), hi: Number(m[2]) } : { lo: loRpm, hi: hiRpm };
+    } finally {
+      this._setMode('idle');
+    }
+  }
+
+  // ---- `gap` (no args): read the current no-dwell gap without changing it ----
+  async getSweepGap() {
+    await this._ensureIdle();
+    if (this._demo) return this._demoGap || { lo: 1325, hi: 1345 };
+    this._setMode('busy');
+    await this.link.write('gap\n');
+    try {
+      const line = await this._waitForLine(/^# gap lo=/, 3000);
+      const m = line.match(/lo=(-?[\d.]+)\s+hi=(-?[\d.]+)/);
+      return m ? { lo: Number(m[1]), hi: Number(m[2]) } : null;
+    } finally {
+      this._setMode('idle');
+    }
   }
 
   // ---- `bump` mode: bump test (triggered acquisition) ----

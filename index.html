@@ -251,6 +251,14 @@
             <button type="button" id="sweep-mode-damped" class="seg-btn" aria-pressed="false">Damped (r2)</button>
           </div>
         </div>
+        <div class="control-row" id="sweep-gap-row">
+          <label for="sweep-gap-lo">No-dwell gap (RPM)</label>
+          <input type="number" id="sweep-gap-lo" value="1325" step="5" />
+          <span>–</span>
+          <input type="number" id="sweep-gap-hi" value="1345" step="5" />
+          <button id="btn-sweep-gap-set" class="btn">Set Gap</button>
+          <span class="panel-status" id="sweep-gap-status"></span>
+        </div>
         <div class="control-row">
           <button id="btn-sweep-start" class="btn btn-primary">Start Sweep</button>
           <button id="btn-sweep-stop" class="btn btn-danger" disabled>Stop</button>

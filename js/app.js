@@ -929,6 +929,10 @@ const inputSweepLoad = document.getElementById('input-sweep-load');
 const btnSweepClearOverlays = document.getElementById('btn-sweep-clear-overlays');
 const sweepStatus = document.getElementById('sweep-status');
 const sweepResonanceHz = document.getElementById('sweep-resonance-hz');
+const sweepGapLo = document.getElementById('sweep-gap-lo');
+const sweepGapHi = document.getElementById('sweep-gap-hi');
+const btnSweepGapSet = document.getElementById('btn-sweep-gap-set');
+const sweepGapStatus = document.getElementById('sweep-gap-status');
 const sweepChart = new BodeChart(document.getElementById('sweep-chart'), {
   title: 'Accel Amplitude vs. RPM',
   xLabel: 'RPM (measured)',
@@ -1054,8 +1058,48 @@ function renderSweepMode() {
   segUndamped.setAttribute('aria-pressed', String(!sweepDamped));
   segDamped.classList.toggle('active', sweepDamped);
   segDamped.setAttribute('aria-pressed', String(sweepDamped));
+  refreshGapControls();
 }
 renderSweepMode();
+
+// ---- No-dwell gap (undamped sweep only -- mode r / `sweep 0`) ----
+// Lets a particular setup's actual instability band be dialled in from the
+// dashboard rather than re-flashing, when it differs from the firmware
+// default (1325-1345) -- see `gap <lo> <hi>` in HMI_PROTOCOL.md. `lastKnownIdle`
+// mirrors the 'mode' event's `idle` flag so the damping-case toggle (which
+// fires with no 'mode' event of its own) can re-gate the row too.
+let lastKnownIdle = true;
+function refreshGapControls() {
+  const supported = client.supportsGapAdjust;
+  const enabled = lastKnownIdle && !sweepDamped && supported;
+  sweepGapLo.disabled = sweepGapHi.disabled = btnSweepGapSet.disabled = !enabled;
+  if (!supported) sweepGapStatus.textContent = 'Firmware has no gap-adjust support — re-flash it.';
+  else if (sweepDamped) sweepGapStatus.textContent = 'Gap only applies to the undamped (r) sweep.';
+  else if (!lastKnownIdle) sweepGapStatus.textContent = '';
+}
+
+btnSweepGapSet.addEventListener('click', async () => {
+  const lo = Number(sweepGapLo.value);
+  const hi = Number(sweepGapHi.value);
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
+    sweepGapStatus.textContent = 'Enter numeric RPM values.';
+    return;
+  }
+  btnSweepGapSet.disabled = true;
+  sweepGapStatus.textContent = 'Setting…';
+  try {
+    const applied = await client.setSweepGap(lo, hi);
+    sweepGapLo.value = applied.lo;
+    sweepGapHi.value = applied.hi;
+    sweepGapStatus.textContent = `Gap set to ${applied.lo}-${applied.hi} RPM.`;
+    appendLog(`[info] sweep no-dwell gap set to ${applied.lo}-${applied.hi} RPM`);
+  } catch (err) {
+    sweepGapStatus.textContent = `Rejected: ${err.message}`;
+    appendLog('[error] gap set: ' + err.message);
+  } finally {
+    refreshGapControls();
+  }
+});
 
 // The damper's added mass lowers the natural frequency to ~21.1 Hz (from the
 // undamped ~22.1 Hz), so the Bode/phase resonance reference line follows the
@@ -1155,9 +1199,13 @@ function resonanceFromPhase(points) {
       const t = (90 - pts[i - 1].y) / (pts[i].y - pts[i - 1].y);
       const rpm = pts[i - 1].x + t * (pts[i].x - pts[i - 1].x);
       // How far apart the straddling points are: on the undamped beam the
-      // crossing can fall inside the sweep's 1330-1360 no-dwell gap, and
-      // interpolating across it is much cruder than across a 5 RPM step.
-      // Fine-band steps are 5 RPM, the gap spans ~30, so 20 separates them.
+      // crossing can fall inside the sweep's no-dwell gap (default 1325-1345,
+      // runtime-adjustable via `gap <lo> <hi>` -- see app.js's gap controls),
+      // and interpolating across it is much cruder than across a 5 RPM fine
+      // step. Fine-band steps are 5 RPM, the default gap spans 20, so 10
+      // separates them -- see the `> 10` check below. A gap widened well past
+      // the default via `gap` could still slip under this fixed threshold;
+      // it's a heuristic, not a hard guarantee.
       return { rpm, spanRpm: pts[i].x - pts[i - 1].x };
     }
   }
@@ -1173,7 +1221,7 @@ client.addEventListener('sweep-done', (e) => {
   let extra = '';
   if (res) {
     extra = ` Phase crosses 90° at ~${res.rpm.toFixed(0)} RPM (${(res.rpm / 60).toFixed(2)} Hz)`;
-    extra += res.spanRpm > 20
+    extra += res.spanRpm > 10
       ? ` -- interpolated across a ${res.spanRpm.toFixed(0)} RPM gap, so treat it as approximate.`
       : '.';
   }
@@ -1732,6 +1780,8 @@ client.addEventListener('mode', (e) => {
   // sweep actually executing (the firmware picked its grid/order at start).
   segUndamped.disabled = !idle;
   segDamped.disabled = !idle;
+  lastKnownIdle = idle;
+  refreshGapControls();
 
   btnBumpStart.disabled = !idle;
   // Abort only works while armed (waiting for a trigger) -- once
