@@ -1053,21 +1053,15 @@ const btnDamperCancelX = document.getElementById('btn-damper-cancel-x');
 let sweepDamped = false;
 let currentRunDamped = false;
 
-function renderSweepMode() {
-  segUndamped.classList.toggle('active', !sweepDamped);
-  segUndamped.setAttribute('aria-pressed', String(!sweepDamped));
-  segDamped.classList.toggle('active', sweepDamped);
-  segDamped.setAttribute('aria-pressed', String(sweepDamped));
-  refreshGapControls();
-}
-renderSweepMode();
-
 // ---- No-dwell gap (undamped sweep only -- mode r / `sweep 0`) ----
 // Lets a particular setup's actual instability band be dialled in from the
 // dashboard rather than re-flashing, when it differs from the firmware
 // default (1325-1345) -- see `gap <lo> <hi>` in HMI_PROTOCOL.md. `lastKnownIdle`
 // mirrors the 'mode' event's `idle` flag so the damping-case toggle (which
-// fires with no 'mode' event of its own) can re-gate the row too.
+// fires with no 'mode' event of its own) can re-gate the row too. Declared
+// (and initialised) before renderSweepMode()'s first call below, which reaches
+// it via refreshGapControls() -- a `let` here only after that call would leave
+// it in the temporal dead zone and throw on page load.
 let lastKnownIdle = true;
 function refreshGapControls() {
   const supported = client.supportsGapAdjust;
@@ -1077,6 +1071,15 @@ function refreshGapControls() {
   else if (sweepDamped) sweepGapStatus.textContent = 'Gap only applies to the undamped (r) sweep.';
   else if (!lastKnownIdle) sweepGapStatus.textContent = '';
 }
+
+function renderSweepMode() {
+  segUndamped.classList.toggle('active', !sweepDamped);
+  segUndamped.setAttribute('aria-pressed', String(!sweepDamped));
+  segDamped.classList.toggle('active', sweepDamped);
+  segDamped.setAttribute('aria-pressed', String(sweepDamped));
+  refreshGapControls();
+}
+renderSweepMode();
 
 btnSweepGapSet.addEventListener('click', async () => {
   const lo = Number(sweepGapLo.value);
