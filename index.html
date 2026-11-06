@@ -330,8 +330,10 @@
       </div>
       <div class="modal-body">
         <p class="panel-hint">
-          Gold lines are encoder pulses (1 per revolution). Measure pulse →
-          next <strong>trough</strong>: phase = 360° × Δt / T.
+          <span class="key-red">Red</span> = proximity pulse (1 per revolution) — it drops at the
+          trigger instant. <span class="key-blue">Blue</span> = acceleration (m/s²) over the whole
+          captured second. Δt = pulse falling edge → next <strong>trough</strong>;
+          T = falling edge → next falling edge; phase = 360° × Δt / T.
         </p>
         <div class="metric-row" id="logsum-metrics">
           <div class="metric">
@@ -340,11 +342,11 @@
           </div>
           <div class="metric">
             <span class="metric-value" id="logsum-amp">—</span>
-            <span class="metric-label">Accel amplitude (g)</span>
+            <span class="metric-label">Accel amplitude <span class="unit">(m/s²)</span></span>
           </div>
           <div class="metric">
             <span class="metric-value" id="logsum-period">—</span>
-            <span class="metric-label">T = 60/RPM (ms)</span>
+            <span class="metric-label">T = 60/RPM <span class="unit">(ms)</span></span>
           </div>
           <div class="metric">
             <span class="metric-value" id="logsum-pulses">—</span>
@@ -362,11 +364,12 @@
           <label for="logsum-harmonics">Harmonics</label>
           <input type="number" id="logsum-harmonics" value="5" min="2" max="40" step="1"
                  title="Cutoff as a multiple of shaft speed. Below ~3 the filter starts attenuating the 1× response itself (timing stays correct; amplitude reads low)." />
+          <button type="button" id="btn-logsum-cleartips" class="btn" title="Remove every pinned data tip from both plots">Clear data tips</button>
         </div>
         <p class="chart-tip">
-          Both filters are phase-preserving — troughs keep their exact time, so
-          your reading stays valid. Hover for values · scroll to zoom · drag to
-          pan · double-click to reset.
+          Click a point to pin a data tip (click it again to remove it) · hover for
+          values · scroll to zoom the time axis · drag to pan · double-click to
+          reset. Both filters are phase-preserving — troughs keep their exact time.
         </p>
         <canvas class="chart chart-large" id="logsum-chart"></canvas>
         <div class="control-row">
@@ -382,6 +385,14 @@
           The raw value is pulse → accel <em>peak</em>, i.e. ≈180° more
           (a = −ω²x), subtracted out above.
         </p>
+        <p class="chart-tip">
+          FFT of the same capture (raw signal, 0–100 Hz, Hann window,
+          amplitude-corrected). The dashed line is the running speed (1×): the
+          tallest peak should sit on it before you trust the phase reading. Its
+          height is the vibration amplitude at that speed.
+        </p>
+        <canvas class="chart chart-fft" id="logsum-fft-chart"></canvas>
+        <p class="panel-status" id="logsum-fft-status"></p>
       </div>
     </div>
   </div>

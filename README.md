@@ -231,9 +231,17 @@ teaching half of the phase story. It sends `log 5` **while `live` is running**
 steady state (see `HMI_PROTOCOL.md` §3 for why that matters). PCB1 captures 5 s
 at full rate, computes the statistics over all of it, and ships back the middle
 1 s of raw waveform plus the encoder pulse times on the same clock. The modal
-plots the two together — accel trace, gold vertical lines per pulse — and asks
-the student to measure pulse→peak and compute 360°×Δt/T themselves. **Reveal
-computed phase** then shows PCB1's own lock-in answer to check against.
+plots the two together the way the course's MATLAB script (`Prak2.m`, the old
+NI-DAQ rig) did: **acceleration in m/s² against time in seconds** over the
+*whole* shipped second (the capture's own clock, e.g. 2.00–3.00 s), with the
+encoder pulses redrawn as the old **rectangular proximity-probe trace** (red,
+dropping to 0 at each trigger instant) under the accel trace (blue), in a
+white MATLAB-style figure with click-to-pin data tips. The student pins the
+pulse's falling edge, the next trough and the next falling edge, and computes
+360°×Δt/T themselves. **Reveal computed phase** then shows PCB1's own lock-in
+answer to check against. Below it, the **FFT** of the same capture (raw, 0–100
+Hz, `Prak2.m`'s `xlim([0 100])`) with the running speed marked is the
+"is the response dominant at 1×?" check, and its peak reads the 1× amplitude.
 
 **The exercise measures to the accel TROUGH, not the peak** — this is the one
 thing to get right here. The encoder fires at maximum *displacement*, but the
@@ -293,21 +301,44 @@ and the trough reading improved from 198.8° to 188.1° against a true 180°. Th
 two stages remove different things — the filter kills harmonics, the averaging
 kills noise — so the Harmonics control applies to both views.
 
-**All three share one window.** The averaged revolution is tiled 6× and the raw
-/ low-pass traces are windowed to the same 6 revolutions, anchored on a pulse
-and taken from the *middle* of the capture (filtering runs on the full record,
-so `filtfilt`'s edge transients stay off screen). Switching views therefore
-changes the trace and nothing else — same span, same pulse lines, same origin.
-The count adapts down when a slow shaft doesn't fit 6 revolutions in the shipped
-window, and with only one revolution available the status says there was nothing
-to average rather than advertising a noise reduction it didn't perform.
+**All three share one window: the whole shipped second, on absolute time.**
+Raw and low-pass plot every sample. The sync view lays the averaged revolution
+back onto *every real revolution* — stretched to each pulse-to-pulse interval,
+plus the partial revolutions at both ends at the mean period — so it lines up
+with the same pulse train and time axis as the other two (a missed pulse's
+double-length gap gets two cycles, and `syncAverage` drops such out-of-length
+"revolutions" from the average). Switching views therefore changes the trace and
+nothing else — same span, same pulses, same origin. With only one revolution
+available the status says there was nothing to average rather than advertising
+a noise reduction it didn't perform. Filtering runs on the full record, so
+`filtfilt`'s edge transients only touch the first/last few ms (tens of ms at a
+very slow shaft) — read Δt away from the ends.
+
+**The pulse trace is synthesised, and only its falling edge means anything.**
+PCB1 sends one timestamp per revolution, not a probe voltage, so the rectangle
+is drawn from those times: high, down to 0 *at* the timestamp, back up after 5%
+of the (median) revolution — the width the old probe's dip had in `Prak2.m`
+figures. The level is arbitrary (picked just above the trace so the y-axis
+stays snug), the y-axis is labelled for the accel. Only the falling-edge
+vertices are snappable, so the cursor and data tips can only ever report the
+trigger time, never the cosmetic end of the dip.
 
 Chart notes: it reuses `BodeChart` (x = time, y = accel) for its wheel-zoom /
 drag-pan / data-cursor — a student needs to zoom to 2-3 cycles to read a trough
-properly. Three small `BodeChart`/`chart.js` additions serve it: `setVLines()`
-for the N pulse markers; `setSeries(..., { markers: false })` — a ~2330-point
-trace must not draw 2330 arcs per redraw, and redraw runs on every pan
-mousemove; and `formatCursor()`, which replaces `formatTick()` in the data
+properly. `BodeChart`/`chart.js` additions that serve it, all **opt-in** (the
+sweep's Bode/phase charts don't pass them and render exactly as before):
+`palette: MATLAB_PALETTE` (white figure, MATLAB's colours, full box with inward
+ticks, independent of the light/dark theme), `dataTips: true` (click a point to
+pin an X/Y tip, click it again to remove it; a double-click still resets zoom
+and pins nothing; tips stay on their data point through zoom/pan and follow the
+trace across a Raw/Low-pass/Sync switch), `zoomMode: 'x'` (wheel/drag move the
+time axis only — MATLAB's `xlim` — so the full amplitude stays in view), and
+per-series `setSeries(..., { presorted, lineWidth, cursor: 'x' })` plus per-point
+`snap: false` for the pulse train. Every zoomed chart is now clipped to its axes
+(previously a zoomed trace was drawn across the tick labels). Older additions:
+`setVLines()` for marker lines; `setSeries(..., { markers: false })` — a
+~2330-point trace must not draw 2330 arcs per redraw, and redraw runs on every
+pan mousemove; and `formatCursor()`, which replaces `formatTick()` in the data
 cursor's readout. That last one matters more than it sounds: `formatTick` is
 axis-label precision (2 decimals under 10), so it rendered `t = 2.5041 s` as
 `2.51` — useless for measuring a few-ms Δt. `formatCursor` derives its decimals
@@ -658,10 +689,20 @@ verified in demo mode.
   flag working, not a fault). The specific thing to check on the bench is the
   *bumpless* handover: at a steady open-loop speed, switch to closed loop at
   the same RPM and confirm the duty doesn't jump or dip, then the reverse.
-- The Log Summary's Sync average shows an averaged revolution **repeated**, not
-  six distinct ones. Every cycle is identical by construction. That's what makes
+- The Log Summary's Sync average draws one averaged revolution onto every
+  revolution, so every cycle is identical by construction. That's what makes
   the trough easy to read, but it also means revolution-to-revolution
   variability — which is real information, e.g. a rotor that hunts — is
   invisible in that view. Raw is one click away and shows it.
+- The Log Summary shows the **1 s** PCB1 ships, not the whole 5 s it captures
+  (the statistics and the revealed phase do use all 5 s). Showing more would
+  need the firmware's `log` dump to ship a longer window — a firmware change,
+  not an HMI one.
+- The FFT pane's amplitudes are true peak amplitudes (`computeAmplitudeSpectrum`:
+  zero-padded, Hann, scaled by the real sample count). The Bump Test and Free
+  Vibration FFTs still use `computeFFT`, which scales by the *padded* length, so
+  their peak heights read low by N/N_padded (between 0.5× and 1×, depending on
+  the record length) — harmless there (only the peak's frequency is used), but
+  don't read amplitudes off them.
 - Log Summary has no **Save Run**, unlike the Sweep, Bump and Free Vibration
   modals, so a capture can't be re-examined offline or kept as a record.
