@@ -36,6 +36,28 @@ const CHART_THEMES = {
   },
 };
 
+// Fixed, theme-independent palette for charts that should look like a MATLAB
+// figure regardless of the HMI's light/dark toggle (the Log Summary, whose
+// whole job is to read like the Prak2.m figures the course used before this
+// apparatus existed). Opt-in per BodeChart via its `palette` option; charts
+// that don't pass it keep following the theme exactly as before. Values are
+// MATLAB's own defaults: axes/ticks/labels [0.15 0.15 0.15], grid the same
+// colour at GridAlpha 0.15, white axes, bold blue datatip values.
+export const MATLAB_PALETTE = {
+  background: '#ffffff',
+  axis: '#262626',
+  grid: 'rgba(38, 38, 38, 0.15)',
+  text: '#262626',
+  title: '#000000',
+  mark: '#4d4d4d',                     // reference lines (e.g. the FFT's 1x marker)
+  markDim: 'rgba(77, 77, 77, 0.5)',
+  cursor: 'rgba(0, 0, 0, 0.3)',
+  cursorOutline: '#262626',
+  tooltipBg: 'rgba(255, 255, 255, 0.97)',
+  tipValue: '#0e4c92',                 // datatip values, as MATLAB draws them
+  box: true,                           // full axes box + inward ticks (MATLAB `box on`)
+};
+
 export let COLOR_AXIS  = CHART_THEMES.dark.axis;
 export let COLOR_GRID  = CHART_THEMES.dark.grid;
 export let COLOR_TEXT  = CHART_THEMES.dark.text;
@@ -122,8 +144,13 @@ const TICK_RESERVE_TEMPLATE = '-000.0';
 // Draws the title, legend and both axis titles as a side effect, and returns
 // the plot-area geometry the caller needs for everything inside the axes.
 export function layoutChartFrame(ctx, {
-  w, h, title = '', xLabel = '', yLabel = '', yTicks = [], legend = [],
+  w, h, title = '', xLabel = '', yLabel = '', yTicks = [], legend = [], palette = null,
 } = {}) {
+  // `palette` (e.g. MATLAB_PALETTE) pins the frame's colours for a chart that
+  // opts out of the light/dark theme; null keeps the theme colours.
+  const colTitle = palette ? palette.title : COLOR_TITLE;
+  const colText = palette ? palette.text : COLOR_TEXT;
+  const swatch = (c) => (palette ? c : themedColor(c));
   ctx.font = CHART_FONT;
   const yTitleBand = yLabel ? 17 : 0;                    // rotated axis title
   const tickW = Math.max(
@@ -131,7 +158,9 @@ export function layoutChartFrame(ctx, {
     yTicks.reduce((mx, v) => Math.max(mx, ctx.measureText(formatTick(v)).width), 0),
   );
   const padLeft = Math.ceil(yTitleBand + tickW + 10);    // + 6px tick gap + 4px edge
-  const padRight = 10;
+  // A MATLAB-style chart labels the last x tick at the very right edge of the
+  // box, so it needs room for half a label there; themed charts keep 10 px.
+  const padRight = palette ? 20 : 10;
   const padBottom = xLabel ? 34 : 20;                    // tick row + axis title row
 
   ctx.font = CHART_TITLE_FONT;
@@ -150,7 +179,7 @@ export function layoutChartFrame(ctx, {
 
   if (title) {
     ctx.font = CHART_TITLE_FONT;
-    ctx.fillStyle = COLOR_TITLE;
+    ctx.fillStyle = colTitle;
     ctx.textAlign = 'left';
     ctx.fillText(title, x0, 11);
   }
@@ -161,15 +190,15 @@ export function layoutChartFrame(ctx, {
     let sx = x0 + plotW - legendW;
     ctx.textAlign = 'left';
     labeled.forEach((s, i) => {
-      ctx.fillStyle = themedColor(s.color);
+      ctx.fillStyle = swatch(s.color);
       ctx.fillRect(sx, ly - 4, 9, 9);
-      ctx.fillStyle = COLOR_TEXT;
+      ctx.fillStyle = colText;
       ctx.fillText(s.label, sx + 13, ly);
       sx += itemW[i];
     });
   }
 
-  ctx.fillStyle = COLOR_TEXT;
+  ctx.fillStyle = colText;
   ctx.textAlign = 'center';
   if (xLabel) ctx.fillText(xLabel, x0 + plotW / 2, y0 + plotH + 26);
   if (yLabel) {

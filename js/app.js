@@ -1,7 +1,7 @@
 import { PCB1Client } from './pcb1-client.js';
-import { RollingChart, setChartTheme } from './chart.js';
+import { RollingChart, setChartTheme, MATLAB_PALETTE, niceTicks } from './chart.js';
 import { BodeChart } from './bode-chart.js';
-import { computeFFT, findPeaks } from './fft.js';
+import { computeFFT, findPeaks, computeAmplitudeSpectrum } from './fft.js';
 import { lowpassFiltfilt, syncAverage } from './filter.js';
 
 const client = new PCB1Client();
@@ -561,9 +561,14 @@ client.addEventListener('vibration-live-sample', (e) => {
 // ============================================================
 // Log Summary (`log`, issued mid-`live`) -- the teaching capture.
 //
-// Deliberately shows RAW accel against RAW encoder pulses and asks the student
-// to measure pulse->peak themselves. The firmware's own answer is available,
-// but behind a Reveal button so the reading gets attempted first.
+// Plots the whole shipped window (1 s of the 5 s capture, on the capture's own
+// clock) as acceleration in m/s^2 against time in s, with the encoder pulses
+// redrawn as the old rig's rectangular proximity-probe trace, in a MATLAB-style
+// figure -- i.e. the Prak2.m "Detailed view" the practicum was taught with --
+// plus the FFT of the same capture. The student reads pulse -> trough (Δt) and
+// pulse -> pulse (T) with data tips and computes the phase themselves; the
+// firmware's own answer stays behind the Reveal button so the reading gets
+// attempted first.
 // ============================================================
 const btnLogsum = document.getElementById('btn-logsum');
 const btnCloseLogsum = document.getElementById('btn-close-logsum');
@@ -584,14 +589,53 @@ const logsumViewBtns = {
   sync: document.getElementById('logsum-view-sync'),
 };
 
-// x = time (s), y = accel (g). BodeChart rather than RollingChart: this is a
-// static XY slice, and its wheel-zoom/drag-pan/data-cursor are exactly what a
-// student needs to zoom to 2-3 cycles and read a peak off precisely.
+// x = time (s), y = acceleration (m/s²), drawn as a MATLAB figure (white axes,
+// '-b' accel, '-r' proximity pulse, clickable data tips) on purpose: it stands in
+// for Prak2.m's "Detailed view" --  plot(time,prox,'-r'); hold on;
+// plot(time,coeff*filtered_accel2,'-b')  -- so students and assistants read it
+// exactly the way they already read that figure. BodeChart rather than
+// RollingChart: this is a static XY slice, and its wheel-zoom/drag-pan/data tips
+// are what a student needs to zoom to 2-3 cycles and read an edge and a trough.
 const logsumChart = new BodeChart(document.getElementById('logsum-chart'), {
-  title: 'Accel vs. Time',
+  title: 'Acceleration and Proximity Pulse vs. Time',
   xLabel: 'Time (s)',
-  yLabel: 'Accel (g)',
+  yLabel: 'Acceleration (m/s²)',
+  palette: MATLAB_PALETTE,
+  dataTips: true,
+  // Zoom/pan the TIME axis only (MATLAB's xlim): zooming in to 2-3 cycles keeps
+  // the whole amplitude -- troughs and pulse edges -- on screen.
+  zoomMode: 'x',
 });
+// The same capture's spectrum -- Prak2.m's FFT figure (xlim([0 100])): the
+// "is the response dominant at running speed?" check before trusting a phase.
+const logsumFftChart = new BodeChart(document.getElementById('logsum-fft-chart'), {
+  title: 'FFT Spectrum (raw signal)',
+  xLabel: 'Frequency (Hz)',
+  yLabel: 'Amplitude (m/s²)',
+  palette: MATLAB_PALETTE,
+  dataTips: true,
+  resonanceFormat: (hz) => `1× running speed = ${hz.toFixed(1)} Hz`,
+});
+const btnLogsumClearTips = document.getElementById('btn-logsum-cleartips');
+const logsumFftStatus = document.getElementById('logsum-fft-status');
+
+const G_TO_MS2 = 9.80665;              // standard gravity: firmware reports g, the worksheet wants m/s²
+const LOGSUM_ACCEL_COLOR = '#0000ff';  // MATLAB '-b'
+const LOGSUM_PULSE_COLOR = '#ff0000';  // MATLAB '-r'
+// PCB1 sends one timestamp per revolution (the encoder trigger), not a probe
+// voltage, so the old rig's proximity trace is redrawn from those times: high,
+// dropping to 0 AT the trigger instant, back up a moment later. The dip width
+// is cosmetic -- ~5% of a revolution, what the old probe's dip measured in the
+// Prak2.m figures -- and only the FALLING edge carries information, so it is the
+// only part of the pulse the cursor and data tips snap to.
+const LOGSUM_PULSE_DUTY = 0.05;
+// Pulse high level: just above the waveform, like the old 8.6 V probe level over
+// the scaled accel in Prak2.m -- at least this multiple of the trace's peak |a|
+// (see logsumPulseHigh for the exact level).
+const LOGSUM_PULSE_MIN_HEIGHT = 1.08;
+const LOGSUM_PULSE_MAX_HEIGHT = 1.45;
+const LOGSUM_FFT_MAX_HZ = 100;         // Prak2.m: xlim([0 100])
+const LOGSUM_FFT_MIN_HZ = 2;           // ignore near-DC bins when picking the dominant peak
 
 let logsumPhaseDeg = NaN;   // the firmware's answer, held back until Reveal
 let lastLogsum = null;      // last capture, kept so the view can be re-rendered
@@ -603,34 +647,88 @@ let logsumView = 'lp';
 // Capture facts (sample count, rate, window) -- constant for a given capture.
 // renderLogsumTrace() appends what the current view did to it.
 let logsumBaseStatus = '';
-// How many copies of the averaged revolution the sync view lays out. One lone
-// cycle is technically all the information there is, but it gives the student a
-// single pulse->trough interval floating in isolation; a handful of repeats
-// reads like the raw trace they already know, so the same measurement (pick a
-// gold line, find the next trough) transfers over directly.
-const LOGSUM_SYNC_REVS = 6;
-
-// Pick `revs` consecutive revolutions from the middle of the capture, anchored
-// on encoder pulses, so the raw and low-pass views span exactly what the sync
-// view synthesises. Middle rather than start for a reason: filtfilt settles at
-// both ends of the record, and taking the centre keeps those edge transients
-// off screen. (Filtering always runs on the FULL record -- only the display is
-// windowed -- so the trace shown is never filtered from a truncated buffer.)
-// Asks for `wantRevs` but settles for however many the capture actually holds,
-// so a slow shaft (whose revolutions are long enough that only one or two fit
-// in the shipped window) degrades to showing those rather than falling out of
-// step with the other views. Returns null only if there isn't one whole
-// revolution to show.
-function logsumWindowRevs(pulses, tFirst, tLast, wantRevs) {
-  const inside = pulses.filter((p) => p >= tFirst && p <= tLast);
-  const totalRevs = inside.length - 1;
-  if (totalRevs < 1) return null;
-  const revs = Math.min(wantRevs, totalRevs);
-  const start = Math.max(0, Math.min(totalRevs - revs, Math.round((totalRevs - revs) / 2)));
-  return { start: inside[start], end: inside[start + revs], revs, totalRevs };
-}
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// Rectangular proximity-pulse trace from the encoder timestamps (see
+// LOGSUM_PULSE_DUTY), in drawing order. The falling edge sits exactly on each
+// pulse time and carries a few extra vertices so the cursor snaps to it anywhere
+// along its height -- every one of them reads the trigger time. The rising edge
+// and the baseline are drawing-only (snap: false), so nothing can report the
+// cosmetic end of the dip as if it were a measurement.
+function proximityPulseTrain(pulses, tStart, tEnd, high, fallbackPeriod) {
+  // One dip width for the whole train, from the MEDIAN pulse spacing: uniform
+  // like the old probe's, and a missed pulse can't make its neighbour's dip
+  // twice as wide.
+  const gaps = [];
+  for (let k = 0; k + 1 < pulses.length; k++) gaps.push(pulses[k + 1] - pulses[k]);
+  gaps.sort((a, b) => a - b);
+  let T = gaps.length ? gaps[Math.floor(gaps.length / 2)] : fallbackPeriod;
+  if (!(T > 0)) T = 0.05;
+  const pts = [{ x: tStart, y: high, snap: false }];
+  for (let k = 0; k < pulses.length; k++) {
+    const p = pulses[k];
+    const width = Math.min(LOGSUM_PULSE_DUTY * T, tEnd - p);
+    pts.push({ x: p, y: high }, { x: p, y: 0.75 * high }, { x: p, y: 0.5 * high },
+             { x: p, y: 0.25 * high }, { x: p, y: 0 });
+    if (width > 0) pts.push({ x: p + width, y: 0, snap: false }, { x: p + width, y: high, snap: false });
+  }
+  pts.push({ x: tEnd, y: high, snap: false });
+  return pts;
+}
+
+// The pulse's high level is arbitrary (it's a timing reference), so pick it to
+// suit the axis: the auto-fit y-axis rounds outward to "nice" ticks, and a fixed
+// 1.25 x peak often tips it into the next coarse step (data to ~12, axis to 20 --
+// a third of the plot empty). This tries levels from 1.08 to 1.45 x peak and
+// keeps the one that leaves the least empty band above the pulse, while still
+// clearing the top of the axes box by >= 6% so the pulse line never merges into
+// the frame. Uses the chart's own niceTicks, so it predicts the real axis.
+function logsumPulseHigh(minY, peak) {
+  let best = LOGSUM_PULSE_MIN_HEIGHT * peak, bestWaste = Infinity;
+  for (let f = LOGSUM_PULSE_MIN_HEIGHT; f <= LOGSUM_PULSE_MAX_HEIGHT + 1e-9; f += 0.01) {
+    const high = f * peak;
+    const { min, max } = niceTicks(Math.min(minY, 0), high, 5);
+    const span = max - min;
+    if (!(span > 0) || max - high < 0.06 * span) continue;
+    const waste = (max - high) / span;
+    if (waste < bestWaste - 1e-9) { bestWaste = waste; best = high; }
+  }
+  return best;
+}
+
+// The sync view laid back onto the real time axis. The averaged revolution
+// (band-limited first -- see renderLogsumTrace) is stretched onto EVERY actual
+// revolution between consecutive pulses, plus the partial revolutions at both
+// ends of the window at the mean period, so it lines up with the real pulse
+// train and the absolute time axis exactly like the raw and low-pass views.
+// Every cycle is identical by construction (that's the noise averaged out);
+// revolution-to-revolution speed variation is still honoured, since each copy
+// is stretched to its own pulse-to-pulse interval.
+function syncAverageOnRevolutions(t, y, pulses) {
+  const avg = syncAverage(t, y, pulses, { repeats: 1 });
+  if (!avg) return null;
+  const m = avg.time.length - 1;          // the last point just closes the cycle
+  const tStart = t[0], tEnd = t[t.length - 1];
+  const P = avg.period;
+  const bounds = [pulses[0] - P, ...pulses, pulses[pulses.length - 1] + P];
+  const points = [];
+  for (let i = 0; i + 1 < bounds.length; i++) {
+    const a = bounds[i], b = bounds[i + 1];
+    if (b < tStart || a > tEnd) continue;
+    // Normally one cycle per pulse interval; a missed pulse leaves a gap two
+    // revolutions long, which gets two cycles rather than one stretched one.
+    const cycles = Math.max(1, Math.round((b - a) / P));
+    const len = (b - a) / cycles;
+    for (let c = 0; c < cycles; c++) {
+      for (let k = 0; k < m; k++) {
+        const x = a + c * len + (avg.time[k] / P) * len;
+        if (x >= tStart && x <= tEnd) points.push({ x, y: avg.accel[k] });
+      }
+    }
+  }
+  return { points, revolutions: avg.revolutions };
+}
 
 // Both filters keep peak TIMES exact, which is the only reason either is
 // allowed near this screen -- the whole exercise is a timing measurement.
@@ -640,12 +738,18 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 //           3400. Keeping ~5 harmonics preserves the waveform's shape while
 //           discarding the decade of band above it that is pure noise.
 //   sync  -- time-synchronous average over the encoder pulses (see
-//           syncAverage): collapses the window to one clean revolution.
+//           syncAverage), redrawn onto every real revolution.
+// All three views show the WHOLE shipped window on the capture's own time axis
+// (seconds since the capture started), not a pulse-anchored excerpt.
 function renderLogsumTrace() {
   if (!lastLogsum) return;
   const s = lastLogsum;
+  if (s.samples.length < 2) return;
   const t = s.samples.map((p) => p.time_s);
-  const y = s.samples.map((p) => p.accel_g);
+  // m/s², as Prak2.m's  acc1 = data(:,2)/acc_sensitivity  gives it.
+  const y = s.samples.map((p) => p.accel_g * G_TO_MS2);
+  const tStart = t[0], tEnd = t[t.length - 1];
+  const pulses = s.pulses.filter((p) => p >= tStart && p <= tEnd).sort((a, b) => a - b);
   const shaftHz = s.rpmAvg > 0 ? s.rpmAvg / 60 : 0;
   const harmonics = clamp(Number(logsumHarmonics.value), 2, 40);
 
@@ -654,13 +758,7 @@ function renderLogsumTrace() {
   const cutoffHz = harmonics * shaftHz;
   const bandLimited = shaftHz > 0 ? lowpassFiltfilt(y, s.actualSps, cutoffHz) : y;
 
-  // Resolved once and shared by all three views -- it decides both how many
-  // revolutions the raw/low-pass traces are windowed to and how many times the
-  // sync view repeats its averaged revolution, which is what keeps the x-axis
-  // identical when switching between them.
-  const win = logsumWindowRevs(s.pulses, t[0], t[t.length - 1], LOGSUM_SYNC_REVS);
-  const shownRevs = win ? win.revs : 1;
-
+  let points = null;
   let note = '';
   if (logsumView === 'sync') {
     // Average the BAND-LIMITED trace, not the raw one. Synchronous averaging
@@ -670,67 +768,78 @@ function renderLogsumTrace() {
     // opposite of the point. Low-passing first removes the harmonics, the
     // averaging then removes the noise, and the two are independent wins.
     // Both stages are phase-preserving, so the trough still doesn't move.
-    const avg = syncAverage(t, bandLimited, s.pulses, { repeats: shownRevs });
+    const avg = syncAverageOnRevolutions(t, bandLimited, pulses);
     if (avg) {
-      logsumChart.title =
-        `Accel vs. Time — ${plural(avg.revolutions, 'revolution')} averaged, shown ${avg.repeats}×`;
-      logsumChart.xLabel = 'Time (s, from an encoder pulse)';
-      logsumChart.setSeries('accel', avg.time.map((x, i) => ({ x, y: avg.accel[i] })),
-                            '#3ecf6e', 'Accel (g)', { markers: false });
-      // Every gold line is an encoder pulse by construction -- each marks one
-      // averaged revolution, so any pulse->trough pair reads the same phase.
-      logsumChart.setVLines(avg.pulseTimes);
-      logsumChart.resetZoom();
-      // Only claim a noise win when there was actually something to average:
-      // a lone revolution is just itself, repeated.
+      points = avg.points;
+      // Only claim a noise win when there was actually something to average.
       note = avg.revolutions > 1
-        ? `Sync-averaged over ${plural(avg.revolutions, 'revolution')} ` +
+        ? `Sync average of ${plural(avg.revolutions, 'revolution')} ` +
           `(~${Math.sqrt(avg.revolutions).toFixed(1)}× less noise), band-limited to ` +
-          `${harmonics}× shaft speed, repeated ${avg.repeats}× — every cycle is identical, ` +
-          `so measure any pulse → next trough.`
-        : `Only one complete revolution in this window — nothing to average, ` +
-          `so this is that revolution band-limited to ${harmonics}× shaft speed.`;
-      logsumStatus.textContent = `${logsumBaseStatus} ${note}`;
-      return;
+          `${harmonics}× shaft speed, drawn onto every revolution — every cycle is ` +
+          `identical by construction.`
+        : `Only one complete revolution — nothing to average, so this is that ` +
+          `revolution band-limited to ${harmonics}× shaft speed.`;
+    } else {
+      // Fewer than one whole revolution (very low RPM, or a stalled rotor).
+      note = 'Not enough complete revolutions to sync-average — showing raw.';
     }
-    // Fewer than one whole revolution in the window (very low RPM, or a stalled
-    // rotor) -- nothing to average, so show raw rather than an empty plot.
-    note = 'Not enough complete revolutions to sync-average — showing raw.';
+  }
+  if (!points) {
+    let plotted = y;
+    if (logsumView === 'lp' && shaftHz > 0) {
+      plotted = bandLimited;
+      note = `Low-pass ${cutoffHz.toFixed(0)} Hz (${harmonics}× shaft speed), zero-phase.`;
+    } else if (logsumView === 'lp') {
+      note = 'No measurable RPM — showing raw.';
+    }
+    points = t.map((x, i) => ({ x, y: plotted[i] }));
   }
 
-  let plotted = y;
-  if (logsumView === 'lp' && shaftHz > 0) {
-    plotted = bandLimited;
-    note = `Low-pass ${cutoffHz.toFixed(0)} Hz (${harmonics}× shaft speed), zero-phase.`;
-  } else if (logsumView === 'lp') {
-    note = 'No measurable RPM — showing raw.';
-  }
+  let peak = 0, minY = 0;
+  for (const p of points) { peak = Math.max(peak, Math.abs(p.y)); minY = Math.min(minY, p.y); }
+  const high = logsumPulseHigh(minY, peak > 0 ? peak : 1);
 
-  // Show the same span the sync view does -- same number of revolutions, same
-  // pulse-anchored origin -- so switching between the three changes the TRACE
-  // and nothing else. Without this the eye has to re-find its place on a
-  // different time axis every time, which defeats comparing them.
-  logsumChart.title = 'Accel vs. Time';
-  const pts = [];
-  if (win) {
-    for (let i = 0; i < t.length; i++) {
-      if (t[i] >= win.start && t[i] <= win.end) pts.push({ x: t[i] - win.start, y: plotted[i] });
-    }
-    logsumChart.xLabel = 'Time (s, from an encoder pulse)';
-    logsumChart.setVLines(s.pulses.filter((p) => p >= win.start && p <= win.end)
-                                  .map((p) => p - win.start));
-    if (win.revs < win.totalRevs) {
-      note = `${note} Showing ${win.revs} of ${plural(win.totalRevs, 'revolution')}.`.trim();
-    }
-  } else {
-    // Not enough whole revolutions to window (very low RPM) -- show everything.
-    for (let i = 0; i < t.length; i++) pts.push({ x: t[i], y: plotted[i] });
-    logsumChart.xLabel = 'Time (s)';
-    logsumChart.setVLines(s.pulses);
-  }
-  logsumChart.setSeries('accel', pts, '#3ecf6e', 'Accel (g)', { markers: false });
+  logsumChart.setVLines([]);
+  // Pulse first so the accel trace draws over it -- Prak2.m's plotting order.
+  logsumChart.setSeries('pulse', proximityPulseTrain(pulses, tStart, tEnd, high, shaftHz > 0 ? 1 / shaftHz : NaN),
+                        LOGSUM_PULSE_COLOR, 'Proximity pulse (1/rev, scaled)',
+                        { markers: false, presorted: true, lineWidth: 1.25, cursor: 'x' });
+  logsumChart.setSeries('accel', points, LOGSUM_ACCEL_COLOR, 'Acceleration (m/s²)',
+                        { markers: false, presorted: true, lineWidth: 1.1 });
   logsumChart.resetZoom();
   logsumStatus.textContent = `${logsumBaseStatus} ${note}`.trim();
+}
+
+// Spectrum of the RAW capture, not the current view's filtered trace: this is
+// the data-validity check, and filtering would hide exactly what it is there to
+// catch. Peak heights read true amplitude (see computeAmplitudeSpectrum), so
+// the 1x peak is the vibration amplitude at running speed, in m/s².
+function renderLogsumFft(s) {
+  const y = s.samples.map((p) => p.accel_g * G_TO_MS2);
+  const { freq, amplitude } = computeAmplitudeSpectrum(y, s.actualSps, { maxHz: LOGSUM_FFT_MAX_HZ });
+  const pts = Array.from(freq, (f, i) => ({ x: f, y: amplitude[i] }));
+  const f1x = s.rpmAvg > 0 ? s.rpmAvg / 60 : NaN;
+  logsumFftChart.setResonanceX(isFinite(f1x) && f1x <= LOGSUM_FFT_MAX_HZ ? f1x : null);
+  logsumFftChart.setSeries('fft', pts, LOGSUM_ACCEL_COLOR, 'Amplitude (m/s²)',
+                           { markers: false, presorted: true, lineWidth: 1.1 });
+  logsumFftChart.resetZoom();
+
+  let kPk = -1;
+  for (let i = 0; i < freq.length; i++) {
+    if (freq[i] < LOGSUM_FFT_MIN_HZ) continue;
+    if (kPk < 0 || amplitude[i] > amplitude[kPk]) kPk = i;
+  }
+  if (kPk < 0) { logsumFftStatus.textContent = ''; return; }
+  let msg = `Dominant peak: ${freq[kPk].toFixed(1)} Hz, ${amplitude[kPk].toFixed(3)} m/s².`;
+  if (isFinite(f1x)) {
+    // A 1 s record resolves ~1 Hz, so "on the 1x line" means within about a bin.
+    const onRunningSpeed = Math.abs(freq[kPk] - f1x) <= Math.max(1, 0.03 * f1x);
+    msg += ` Running speed 1× = ${f1x.toFixed(1)} Hz (${s.rpmAvg.toFixed(0)} RPM) — ` +
+      (onRunningSpeed
+        ? '✓ dominant at running speed.'
+        : '⚠ not at running speed: let the RPM settle and check the sensor before reading the phase.');
+  }
+  logsumFftStatus.textContent = msg;
 }
 
 function setLogsumView(view) {
@@ -748,13 +857,18 @@ for (const [k, btn] of Object.entries(logsumViewBtns)) {
 // 'change' not 'input' -- re-filtering ~2330 samples per keystroke is wasted work.
 // Applies to the sync view too: it band-limits before averaging.
 logsumHarmonics.addEventListener('change', () => { if (logsumView !== 'raw') renderLogsumTrace(); });
+btnLogsumClearTips.addEventListener('click', () => { logsumChart.clearTips(); logsumFftChart.clearTips(); });
 
 btnLogsum.addEventListener('click', async () => {
   btnLogsum.disabled = true;
   openModal('modal-logsum');
   logsumChart.resize();
-  logsumChart.clear();
+  logsumChart.clear();        // also drops any data tips from the last capture
   logsumChart.setVLines([]);
+  logsumFftChart.resize();
+  logsumFftChart.clear();
+  logsumFftChart.setResonanceX(null);
+  logsumFftStatus.textContent = '';
   lastLogsum = null;          // don't let a view switch re-render the previous capture
   logsumBaseStatus = '';
   logsumStatus.textContent = 'Recording 5 s at full rate…';
@@ -782,7 +896,7 @@ client.addEventListener('logsum-result', (e) => {
 
   const T_ms = s.rpmAvg > 0 ? 60000 / s.rpmAvg : NaN;
   logsumRpm.textContent = s.rpmAvg.toFixed(1);
-  logsumAmp.textContent = s.ampG.toFixed(4);
+  logsumAmp.textContent = (s.ampG * G_TO_MS2).toFixed(3);
   logsumPeriod.textContent = isFinite(T_ms) ? T_ms.toFixed(1) : '—';
   logsumPulses.textContent = String(s.pulses.length);
 
@@ -791,6 +905,7 @@ client.addEventListener('logsum-result', (e) => {
     `(${(s.samples.length / s.actualSps).toFixed(2)} s of ${s.durationS.toFixed(0)} s, ` +
     `from t=${s.windowStartS.toFixed(2)} s).`;
   renderLogsumTrace();   // draws the trace and appends what it did to the status
+  renderLogsumFft(s);
 
   btnLogsumReveal.disabled = !isFinite(s.phaseDeg);
   btnLogsum.disabled = client.mode !== 'live';
