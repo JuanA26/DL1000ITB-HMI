@@ -413,6 +413,8 @@ body {
 .metric { display: flex; flex-direction: column; }
 .metric-value { font-size: 1.6rem; font-weight: 600; color: var(--accent); text-shadow: 0 0 18px var(--glow-accent); }
 .metric-label { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+/* Units inside an upper-cased label keep their case: "(m/s²)" must not read "(M/S²)". */
+.metric-label .unit { text-transform: none; }
 
 .chart {
   width: 100%; height: 190px; min-height: 190px; flex: 1 1 auto;
@@ -529,6 +531,16 @@ body {
    being checked -- so it's deliberately quieter. */
 .logsum-answer-raw { font-size: 0.8rem; color: var(--text-dim); }
 #sweep-chart, #sweep-phase-chart, #bump-time-chart, #bump-fft-chart { cursor: crosshair; }
+/* Log Summary: MATLAB-style figures. The canvases paint their own white
+   background (MATLAB_PALETTE), so they read the same in light and dark mode. */
+#logsum-chart, #logsum-fft-chart { cursor: crosshair; }
+.chart-fft { height: 260px; min-height: 260px; flex: none; }
+/* Colour keys in the Log Summary hint, matching the plot's '-r' / '-b' traces
+   (lightened just enough to stay legible on the dark panel). */
+.key-red { color: #ff4d4d; font-weight: 600; }
+.key-blue { color: #5b8cff; font-weight: 600; }
+body.light .key-red { color: #d40000; }
+body.light .key-blue { color: #0000e6; }
 
 .file-btn {
   display: inline-block;
