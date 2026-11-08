@@ -894,14 +894,7 @@ export class PCB1Client extends EventTarget {
     const fn = 1326, q = 18;
     let i = 0;
     let t = 0;
-    this._demoTimer = setInterval(() => {
-      if (i >= grid.length) {
-        clearInterval(this._demoTimer);
-        this._demoTimer = null;
-        this.dispatchEvent(new CustomEvent('sweep-done', { detail: { aborted: false } }));
-        this._setMode('idle');
-        return;
-      }
+    const emitPoint = () => {
       const targetRpm = grid[i++];
       const ratio = q * (targetRpm - fn) / fn;
       // amp1x = the clean Lorentzian (what a lock-in recovers); ampG = the same
@@ -948,7 +941,23 @@ export class PCB1Client extends EventTarget {
           phase_deg: phaseDeg,
         },
       }));
-    }, 120);
+    };
+    // Paced by the wall clock, not by ticks: while the Figures tab is in front
+    // this tab is in the background, where timers fire only about once a
+    // second -- so each tick emits every point that is due by now.
+    const STEP_MS = 120;
+    const t0 = performance.now();
+    this._demoTimer = setInterval(() => {
+      if (i >= grid.length) {
+        clearInterval(this._demoTimer);
+        this._demoTimer = null;
+        this.dispatchEvent(new CustomEvent('sweep-done', { detail: { aborted: false } }));
+        this._setMode('idle');
+        return;
+      }
+      const due = Math.min(grid.length, Math.floor((performance.now() - t0) / STEP_MS));
+      do emitPoint(); while (i < due);
+    }, STEP_MS);
   }
 
   // Fast-forwarded demo bump test: arm (short simulated wait for a "tap"),
@@ -970,8 +979,10 @@ export class PCB1Client extends EventTarget {
         const wd = wn * Math.sqrt(Math.max(0, 1 - zeta * zeta));
         let idx = 0;
         const chunk = 400;
+        const t0 = performance.now();
         this._demoTimer = setInterval(() => {
-          const end = Math.min(n, idx + chunk);
+          // Wall-clock paced (see _demoRunRpmSweep): a chunk per 30 ms elapsed.
+          const end = Math.min(n, Math.max(idx + chunk, Math.round((performance.now() - t0) / 30 * chunk)));
           for (; idx < end; idx++) {
             const tt = idx / sps;
             const g = peakG * Math.exp(-zeta * wn * tt) * Math.cos(wd * tt) + (Math.random() - 0.5) * 0.008;
@@ -1006,8 +1017,10 @@ export class PCB1Client extends EventTarget {
     this.dispatchEvent(new CustomEvent('freevib-start', { detail: { sps, biasV: 1.953 } }));
     let idx = 0;
     const chunk = 60;
+    const t0 = performance.now();
     this._demoTimer = setInterval(() => {
-      const end = Math.min(n, idx + chunk);
+      // Wall-clock paced (see _demoRunRpmSweep): a chunk per 40 ms elapsed.
+      const end = Math.min(n, Math.max(idx + chunk, Math.round((performance.now() - t0) / 40 * chunk)));
       for (; idx < end; idx++) {
         const tt = idx / sps;
         const g = a0 * Math.exp(-zeta * wn * tt) * Math.cos(wd * tt) + (Math.random() - 0.5) * 0.004;
