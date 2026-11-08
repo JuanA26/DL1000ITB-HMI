@@ -593,3 +593,30 @@ body.light .panel:hover {
 /* The Serial Log stays a dark console in both themes (see :root comment);
    just keep its shell borders consistent with the light chrome. */
 body.light .log-panel { background: #0b0d0c; }
+
+/* ---------------- Figures tab link + "saved" toast ---------------- */
+/* The Figures tab itself is figures.html / css/figures.css. */
+.btn-figures { padding: 0.3rem 0.75rem; font-size: 0.8rem; white-space: nowrap; }
+.topbar-check {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  font-size: 0.8rem; color: var(--text-dim); cursor: pointer; user-select: none;
+}
+.topbar-check input { margin: 0; accent-color: var(--accent); }
+
+.toast {
+  position: fixed; right: 1.25rem; bottom: 1.25rem; z-index: 1000;
+  display: flex; align-items: center; gap: 0.75rem;
+  max-width: min(32rem, calc(100vw - 2.5rem));
+  padding: 0.65rem 0.6rem 0.65rem 1rem;
+  background: var(--panel-bg); color: var(--text);
+  border: 1px solid var(--accent); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  font-size: 0.88rem;
+}
+.toast[hidden] { display: none; }
+.toast-close {
+  background: none; border: none; color: var(--text-dim); cursor: pointer;
+  font-size: 1.1rem; line-height: 1; padding: 0.1rem 0.3rem; border-radius: 4px;
+}
+.toast-close:hover { color: var(--text); background: var(--btn-hover); }
+body.light .toast { box-shadow: 0 6px 18px rgba(30, 40, 35, 0.16); }
