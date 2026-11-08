@@ -27,16 +27,14 @@ modules, so it can be hosted as-is on GitHub Pages later.
    since they're occasional, longer-running operations with their own
    large plots rather than something to glance at continuously.
 
-Both the Status and Dashboard topbars carry a **☀ Light / 🌙 Dark** toggle.
-Dark is the default look; the choice persists in `localStorage`
-(`hmi-theme`). The DOM restyles through CSS variables (`body.light` in
-`css/style.css`), and the canvas charts — which can't read CSS variables —
-swap their own palette in step via `setChartTheme()` in `js/chart.js`, which
-also repaints every registered chart so plots that only redraw on
-interaction (sweep, bump, log summary) don't keep stale colors. Series
-colors passed as literals from `app.js` are darkened for the light
-background through `themedColor()`'s mapping table. The Serial Log panels
-deliberately stay dark in both themes.
+Both the Status and Dashboard topbars carry a **☀ Light / 🌙 Dark** toggle and
+a **▦ Figures** button (see [Figures tab](#figures-tab-figureshtml)); the
+Dashboard's also has the **Auto-open** checkbox for it. Dark is the default
+look; the choice persists in `localStorage` (`hmi-theme`). The DOM restyles
+through CSS variables (`body.light` in `css/style.css`). The charts don't
+follow the theme: every one is a white MATLAB figure in both (see
+[Charts](#charts-jsmatlab-axesjs)), so `setChartTheme()` in `js/chart.js` only
+repaints them. The Serial Log panels deliberately stay dark in both themes.
 
 ## Demo mode
 
@@ -263,6 +261,21 @@ disagreement against a hand reading is expected and worth saying out loud: a
 trough is flattest exactly where you're trying to read its position.
 `btn-logsum` is enabled only while `mode === 'live'`.
 
+**Below ~0.8 fₙ, expect ≈ 0° give or take a degree or two — not a smooth
+curve.** The phase is *measured* (encoder pulse → response); nothing in this
+HMI computes it from fₙ, so a change of the beam's natural frequency (it is now
+~22.1-22.3 Hz) doesn't affect the reading. With no damper fitted (structural
+damping only, ζ ≈ 0.005-0.02) the true lag far from resonance is tiny —
+φ = atan2(2ζr, 1−r²) gives 0.2-0.8° at r = 0.3 and 0.4-1.5° at r = 0.5 — which
+is below what a single capture resolves: one sample is 0.43 ms ≈ 1° of a
+revolution at 400 RPM, the 1× response is weak at low speed (the unbalance
+force grows with ω²), and the mounting offset can't be removed from one capture.
+So readings like 2° at r = 0.3 then −0.2° at r = 0.5 are scatter around zero.
+The lag only becomes large, and steep, near resonance: ≈ 3-11° at 0.9 fₙ,
+6-21° at 0.95 fₙ, 26-63° at 0.99 fₙ (ζ = 0.005-0.02) — so spend the captures
+between ~0.9 and 1.1 fₙ in small RPM steps, and repeat each one; the Figures
+tab keeps every capture to compare.
+
 ### The three trace views
 
 The raw ADXL trace carries broadband noise across the ADS1220's whole ~1165 Hz
@@ -323,28 +336,21 @@ stays snug), the y-axis is labelled for the accel. Only the falling-edge
 vertices are snappable, so the cursor and data tips can only ever report the
 trigger time, never the cosmetic end of the dip.
 
-Chart notes: it reuses `BodeChart` (x = time, y = accel) for its wheel-zoom /
-drag-pan / data-cursor — a student needs to zoom to 2-3 cycles to read a trough
-properly. `BodeChart`/`chart.js` additions that serve it, all **opt-in** (the
-sweep's Bode/phase charts don't pass them and render exactly as before):
-`palette: MATLAB_PALETTE` (white figure, MATLAB's colours, full box with inward
-ticks, independent of the light/dark theme), `dataTips: true` (click a point to
-pin an X/Y tip, click it again to remove it; a double-click still resets zoom
-and pins nothing; tips stay on their data point through zoom/pan and follow the
-trace across a Raw/Low-pass/Sync switch), `zoomMode: 'x'` (wheel/drag move the
-time axis only — MATLAB's `xlim` — so the full amplitude stays in view), and
-per-series `setSeries(..., { presorted, lineWidth, cursor: 'x' })` plus per-point
-`snap: false` for the pulse train. Every zoomed chart is now clipped to its axes
-(previously a zoomed trace was drawn across the tick labels). Older additions:
-`setVLines()` for marker lines; `setSeries(..., { markers: false })` — a
-~2330-point trace must not draw 2330 arcs per redraw, and redraw runs on every
-pan mousemove; and `formatCursor()`, which replaces `formatTick()` in the data
-cursor's readout. That last one matters more than it sounds: `formatTick` is
-axis-label precision (2 decimals under 10), so it rendered `t = 2.5041 s` as
-`2.51` — useless for measuring a few-ms Δt. `formatCursor` derives its decimals
-from the *visible span* (~4 significant digits across it), so it suits every
-axis in the app (seconds, RPM, degrees, g) and automatically sharpens as you
-zoom in — `2.5041` at a 1 s span, `2.50412` at 0.1 s.
+Chart notes: the trace and the FFT are `BodeChart`s (x = time, y = accel) and,
+like every chart in the HMI, MATLAB axes with the axes toolbar and data tips
+(see [Charts](#charts-jsmatlab-axesjs)). For this exercise the useful tools are
+**Zoom In with a horizontal line** (zooms time only — the quick way down to 2-3
+cycles with the whole amplitude still in view), click-to-pin **data tips** (they
+stay on their data point through zoom/pan and follow the trace across a
+Raw/Low-pass/Sync switch; a double-click restores the view and pins nothing),
+and the scroll wheel, which now zooms both axes about the cursor as in MATLAB
+(it used to zoom time only). The pulse train is set with
+`setSeries(..., { presorted, lineWidth, cursor: 'x' })` and per-point
+`snap: false`, so a tip on it can only land on a falling edge — the trigger
+time, never the cosmetic end of the dip. Tips print up to 6 significant digits
+(`formatTipValue()`), so a few-ms Δt reads exactly (`2.36996 s`). The drawing
+itself is in `js/logsum-plot.js`, shared by this modal and the Figures tab, so a
+capture looks identical in both.
 
 **The Stroboscope panel takes a target RPM, not a duty** (protocol v2). PCB1
 holds that speed with the same PI+feedforward loop the Motor panel uses, so the
@@ -397,22 +403,52 @@ following `< # HMI READY v2` — check that the board is in (or reachable to)
 HMI mode. `PCB1Client.connect()` sends `\n` / `x` / `hmi` and waits up to 8 s
 for the banner.
 
-## Charts (`js/chart.js`)
+## Charts (`js/matlab-axes.js`)
 
-`RollingChart` is a small dependency-free canvas strip chart, styled after
-this project's own offline MATLAB plots (`PlotClosedLoopLog.m` /
-`PlotVibrationLog.m`): an axis box with numeric tick labels on both axes
-("nice number" autoscaling, same rounding behavior as MATLAB's default),
-axis titles, an optional chart title, and a color-swatch legend — not just
-a bare line trace. `push(timeMs, ...values)` plots against real elapsed
-seconds (like `plot(t, y)`), not sample index, so it stays correct
-regardless of the actual sample rate of whichever panel is feeding it.
-`push()` redraws on every call, which is fine for live streams (a few points
-per frame) but not for bulk loads — `beginBatch()`/`endBatch()` wrap a large
-fill (e.g. the ~11 k-row bump dump, or its FFT) so points accumulate and the
-canvas redraws **once** at the end, instead of thousands of synchronous
-redraws blocking the main thread (which is what let the serial transfer stall
-and drop data).
+Every plot in the HMI — the live RPM/Duty/Accel strips, the Log Summary trace
+and FFT, the sweep's amplitude and phase, the bump and free-vibration traces and
+spectra, and every figure in the Figures tab — is a MATLAB-style axes drawn by
+one base class, `MatlabAxes` (`js/matlab-axes.js`). `RollingChart`
+(`js/chart.js`: time series fed with `push()`) and `BodeChart`
+(`js/bode-chart.js`: XY series set with `setSeries()`) only supply the data, the
+automatic limits and the hit-testing.
+
+**Look** — MATLAB's defaults: a white figure in both HMI themes; MATLAB's colour
+order (`#0072bd`, `#d95319`, `#edb120`, …); a dark-grey box on all four sides
+with inward ticks; a light grid; Helvetica/Arial; tick labels without trailing
+zeros ("5", "5.1", not "5.00"); "nice" automatic limits that carry their own
+ticks (a 0–0.06 axis is labelled 0, 0.01, … 0.06 — never 0, 0.05); a centred
+bold title; a legend placed 'best', in a corner, or above the axes.
+
+**Axes toolbar** — appears at the top-right of a plot while the pointer is over
+it (and stays while a mode is on), like MATLAB's:
+
+| Button | What it does |
+|---|---|
+| Export ▸ | **Save as PNG…** (2× resolution, named after the plot/figure) or **Copy as Image** |
+| Data Tips | click points to pin X/Y tips; click a tipped point again to remove it |
+| Pan | drag to move the view |
+| Zoom In | drag a **box** to zoom to it; drag a (nearly) **horizontal line** to zoom x only, or a **vertical line** to zoom y only (MATLAB's constrained zoom); a click zooms 2× about the point, Shift-click zooms out |
+| Zoom Out | click to zoom out 2× about the point — never past the original view |
+| Restore View | back to the automatic limits |
+
+With no mode on (the default): hovering shows the nearest point, a click pins a
+data tip, a drag pans, the scroll wheel zooms both axes about the cursor, a
+double-click restores the view, and right-click opens a menu (Restore View,
+Delete All Data Tips, Save as PNG…, Copy as Image). Plots stacked on a shared x
+axis — the sweep's amplitude and phase, in the modal and in the Figures tab — are
+linked like `linkaxes(..., 'x')`: zooming, panning or restoring one moves both.
+Dense traces are min/max-decimated per pixel column when drawn, so the 11 k-35 k
+sample bump captures still pan smoothly.
+
+`RollingChart.push(timeMs, ...values)` plots against real elapsed seconds (like
+`plot(t, y)`), not sample index, so it stays correct regardless of the actual
+sample rate of whichever panel is feeding it. `push()` redraws on every call,
+which is fine for live streams (a few points per frame) but not for bulk loads —
+`beginBatch()`/`endBatch()` wrap a large fill (e.g. the ~11 k-row bump dump, or
+its FFT) so points accumulate and the canvas redraws **once** at the end,
+instead of thousands of synchronous redraws blocking the main thread (which is
+what let the serial transfer stall and drop data).
 
 Two modes:
 - **Unbounded scrolling** (default, e.g. the RPM/Duty charts): keeps the
@@ -424,23 +460,18 @@ Two modes:
   0 every `windowSeconds` — deliberately chosen over a reset-and-refill
   sweep to avoid a jarring, sudden trace jump every few seconds.
 
-### Plot-frame geometry (`layoutChartFrame`)
+The live strips use `xTight` (x limits exactly the buffered span, MATLAB's
+`axis tight`), so a scrolling window doesn't jump between tick boundaries;
+one-shot captures keep MATLAB's rounded-out limits (e.g. 0–5 s).
 
-`RollingChart` and `BodeChart` share one layout helper, so a fix to either
-axis-margin problem lands on every chart at once. Two decisions there are worth
-knowing, because the obvious implementation of each is wrong:
+### Plot-frame geometry
 
-- **The left margin is measured, not fixed.** A hardcoded 44 px let a wide tick
-  label ("200.0") run straight through the rotated y-axis title.
-- **…but it's measured against a fixed worst-case template, not the labels
-  currently on screen.** Sizing it to the live labels reintroduced a subtler
-  problem: an autoscaling axis changes its widest label as data arrives ("0.40"
-  gains a minus sign the first time the trace dips negative; "500.0" becomes
-  "2000" during spin-up), so the whole plot box shifted a few pixels every time
-  the axis rescaled — a constant squish/expand while streaming. The template
-  covers every string `formatTick` can emit, so the box is pinned for the whole
-  run, and stacked pairs meant to be read against each other (RPM/Duty, and the
-  sweep's amplitude/phase) share one margin and line up.
+The left margin is measured from the widest y tick label, but never narrower
+than a fixed reserve (`-000.0`): sized to the live labels alone, an autoscaling
+axis would shift the whole plot box a few pixels whenever its widest label
+changed ("0.40" gaining a minus sign the first time the trace dips negative),
+a constant squish/expand while streaming. The right margin leaves room for half
+of the last x label.
 
 `niceTicks` nudges by 1e-9 before rounding outward. Data whose extreme lands
 *exactly* on a tick rarely divides exactly in floating point — `0.3 / 0.1` is
@@ -459,6 +490,55 @@ bump-test path. The one thing that retires with it is the damping-ratio
 nonlinear-sinusoid fit, which this client deliberately doesn't reproduce —
 **Save Run** to JSON and fit offline if it's needed (see "Advanced Tests"
 below).
+
+## Figures tab (`figures.html`)
+
+The HMI's answer to MATLAB's Figures window. Every capture — **Log Summary,
+Bump Test, RPM Sweep, Free Vibration** — is saved as a numbered figure
+("Figure 1", "Figure 2", …) in a separate browser tab, where it stays until it
+is closed. So you can go back to the Motor panel, change the speed and take the
+next capture without losing the previous plot — the point when stepping through
+speeds near resonance. The HMI's own modals work exactly as before.
+
+- **Opening it.** With **Auto-open** on (topbar checkbox, default on, remembered
+  in `localStorage` as `hmi-figures-autoopen`), starting any capture brings the
+  Figures tab to the front with a placeholder ("Recording 5 s at full rate…",
+  "Armed — tap the beam…", live progress), which turns into the figure when the
+  result arrives. The tab has to come forward *at the start*: browsers only let
+  a page open or focus another tab in direct response to a click. The
+  **▦ Figures** button opens it any time; with Auto-open off a capture is saved
+  silently and a "Saved as Figure N" notice offers to open it. The same tab is
+  reused (found by its window name), also after either tab is reloaded.
+- **Each figure** is drawn with the same chart classes and analysis code as the
+  modal (`js/figure-views.js`, `js/logsum-plot.js`, `js/sweep-analysis.js`,
+  `js/freevib-analysis.js`) and keeps its controls: Raw/Low-pass/Sync average,
+  harmonics, Reveal computed phase (Log Summary); cutoff, show-raw, Reveal f & ζ
+  (Free Vibration); linked amplitude/phase axes (Sweep). A sweep's figure fills
+  in live, point by point.
+- **Numbering** follows MATLAB: a new figure takes the lowest free number, so
+  after closing Figure 2 the next capture becomes Figure 2.
+- **Closing**: × on the tab, middle-click, or Delete on a focused tab; **Close
+  All** asks for a second click. Arrow keys move between figure tabs.
+- **Storage**: IndexedDB (`dl1000-hmi-figures`), so figures survive reloading
+  either tab and closing the Figures tab; they're per-browser and per-computer.
+  If the browser blocks storage the figures are kept only while the HMI tab
+  stays open, and the Figures tab says so. Use each plot's Export button (or the
+  modals' **Save Run…**) for anything that must outlive the browser.
+- **Unfinished captures**: a capture that ends with nothing to show (bump
+  aborted while armed, too few samples, the cable pulled) removes its
+  placeholder; a sweep stopped early keeps its points, marked aborted. If the
+  HMI tab is closed or reloaded mid-capture, the Figures tab settles that figure
+  within a few seconds (each HMI tab holds a Web Lock while open, which is how
+  the Figures tab tells). A finished capture is always kept — if its placeholder
+  was closed meanwhile, it comes back as a new figure.
+
+Files: `figures.html`, `css/figures.css`, `js/figures.js` (the tab),
+`js/figure-store.js` (storage, numbering, cross-tab messages over a
+`BroadcastChannel`), `js/figure-views.js` (one view per capture type).
+
+Demo-mode note: the simulated captures are paced by the wall clock, so they run
+at the same speed while the Figures tab is in front (a background tab's timers
+fire only about once a second).
 
 ## Advanced Tests: RPM Sweep/Bode Plot, Bump Test, and Free Vibration
 
@@ -482,7 +562,7 @@ comparison), which `RollingChart`'s single rolling time-buffer can't
 represent. **Save Run** exports the finished run's points (all CSV
 fields, plus an optional label) as a downloadable JSON file; **Load
 Run(s)** reads one or more of those files back in as additional overlay
-series, each auto-assigned a color from a small palette — this is the
+series, each auto-assigned the next colour of MATLAB's colour order — this is the
 mechanism for comparing, e.g., the effect of added damping across
 separate sweep runs (potentially days apart). Starting a new sweep only
 clears the *live* series, not loaded overlays, since the whole point is
@@ -581,7 +661,7 @@ things worth knowing about how it's rendered:
 - **The y-axis is fixed** (`yFixed`, -30…210) rather than auto-fit: phase is
   physically bounded, so a fixed frame keeps runs comparable and stops a flat
   pre-resonance trace being magnified into pure noise. `refY: 90` draws the
-  crossing line. Wheel-zoom still overrides; double-click returns here.
+  crossing line. Zooming still overrides it; Restore View (or a double-click) returns here.
 
 On the undamped beam the crossing usually lands inside the sweep's (default)
 1325-1350 no-dwell gap, so it's interpolated across ~25 RPM — the status line says so
@@ -644,7 +724,7 @@ ring-down, the mean peak-to-peak spacing gives the damped frequency f_d, and a
 least-squares fit of `ln(peak amplitude)` vs. cycle index gives the logarithmic
 decrement δ — from which ζ = δ/√(4π²+δ²) and the undamped
 fₙ = f_d/√(1−ζ²). Those are held behind a **Reveal computed f & ζ** button
-(`btn-freevib-reveal`), so students first measure with the data cursor (natural
+(`btn-freevib-reveal`), so students first measure with data tips (natural
 frequency from peak spacing, damping from how fast peaks shrink) and then check
 against the computed values — the same estimate-then-reveal pattern as Log
 Summary's phase. **Stop** aborts at any point (the firmware's stream loop checks
@@ -704,5 +784,8 @@ verified in demo mode.
   their peak heights read low by N/N_padded (between 0.5× and 1×, depending on
   the record length) — harmless there (only the peak's frequency is used), but
   don't read amplitudes off them.
-- Log Summary has no **Save Run**, unlike the Sweep, Bump and Free Vibration
-  modals, so a capture can't be re-examined offline or kept as a record.
+- Log Summary has no **Save Run** (JSON), unlike the Sweep, Bump and Free
+  Vibration modals. The Figures tab keeps every capture in this browser and each
+  plot exports as a PNG, but there's no data file to re-examine offline.
+- Figures live in this browser's storage on this computer (IndexedDB): another
+  browser or computer won't see them, and clearing the site's data deletes them.

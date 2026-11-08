@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Figures — Dynamics Lab Vibration Apparatus</title>
+  <link rel="stylesheet" href="css/figures.css" />
+</head>
+<body>
+  <!-- MATLAB-style Figures window: every capture started from the HMI tab
+       (Log Summary, Bump Test, RPM Sweep, Free Vibration) lands here as a
+       numbered figure and stays until it is closed. See js/figures.js. -->
+  <header class="fig-header">
+    <div class="fig-brand">
+      <span class="fig-logo" aria-hidden="true"></span>
+      <span class="fig-brand-title">Figures</span>
+      <span class="fig-brand-sub">Dynamics Lab — Vibration Apparatus</span>
+    </div>
+    <div class="fig-actions">
+      <span class="fig-count" id="fig-count"></span>
+      <button type="button" class="fig-btn" id="btn-close-all" disabled>Close All</button>
+    </div>
+  </header>
+  <nav class="fig-tabs" id="fig-tabs" role="tablist" aria-label="Figures"></nav>
+  <p class="fig-warning" id="fig-storage-warning" hidden>
+    This browser isn't letting the page store figures, so they're kept only while the HMI tab stays open —
+    reloading or closing the HMI tab loses them. Save anything important with each plot's export button.
+  </p>
+  <main class="fig-main" id="fig-main">
+    <div class="fig-empty" id="fig-empty">
+      <h2>No figures yet</h2>
+      <p>
+        Run a <b>Log Summary</b>, <b>Bump Test</b>, <b>RPM Sweep</b> or <b>Free Vibration</b>
+        capture in the HMI tab. Each one opens here as a new numbered figure — like MATLAB's
+        Figures window — and stays until you close it, so you can change the speed and take
+        the next capture without losing this one.
+      </p>
+    </div>
+  </main>
+  <script type="module" src="js/figures.js"></script>
+</body>
+</html>
