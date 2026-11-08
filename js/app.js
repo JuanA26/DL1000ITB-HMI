@@ -1,8 +1,18 @@
 import { PCB1Client } from './pcb1-client.js';
-import { RollingChart, setChartTheme } from './chart.js';
+import { RollingChart, setChartTheme, MATLAB_COLORS } from './chart.js';
 import { BodeChart } from './bode-chart.js';
 import { computeFFT, findPeaks } from './fft.js';
-import { lowpassFiltfilt, syncAverage } from './filter.js';
+import { lowpassFiltfilt } from './filter.js';
+import { phaseSeriesFor, resonanceFromPhase } from './sweep-analysis.js';
+import { analyzeFreeVibration } from './freevib-analysis.js';
+import {
+  G_TO_MS2, renderLogsumTrace as drawLogsumTrace, renderLogsumSpectrum as drawLogsumSpectrum,
+  logsumCaptureFacts, logsumRevealText,
+} from './logsum-plot.js';
+import {
+  claimHmiSession, createFigure, updateFigure, deleteFigure, postFigureMessage,
+  openFiguresWindow, figureTitle, reapOrphanFigures,
+} from './figure-store.js';
 
 const client = new PCB1Client();
 
@@ -33,6 +43,176 @@ document.querySelectorAll('.theme-toggle').forEach((btn) =>
     applyTheme();
   }),
 );
+
+// ============================================================
+// Figures -- the MATLAB-style Figures tab (figures.html). Every capture (Log
+// Summary, Bump Test, RPM Sweep, Free Vibration) is saved there as a numbered
+// figure that stays until it is closed, so going back to the motor panel,
+// changing the speed and taking the next capture never loses the last plot.
+// Lifecycle: a figure is created when the capture starts (a spinner -- and,
+// with Auto-open on, the Figures tab comes to the front, which a browser only
+// allows inside the click), filled in when the result arrives, and dropped if
+// the capture ends with nothing to show. The modals here are unchanged.
+// See figure-store.js (storage, numbering) and figures.js (the tab).
+// ============================================================
+const HMI_SESSION = claimHmiSession();
+const FIGURES_AUTO_KEY = 'hmi-figures-autoopen';
+const chkFiguresAuto = document.getElementById('chk-figures-auto');
+const toastEl = document.getElementById('toast');
+const toastText = document.getElementById('toast-text');
+const toastOpen = document.getElementById('toast-open');
+
+try { chkFiguresAuto.checked = localStorage.getItem(FIGURES_AUTO_KEY) !== '0'; } catch { /* storage blocked */ }
+chkFiguresAuto.addEventListener('change', () => {
+  try { localStorage.setItem(FIGURES_AUTO_KEY, chkFiguresAuto.checked ? '1' : '0'); } catch { /* storage blocked */ }
+});
+
+const POPUP_BLOCKED = 'The browser blocked the Figures tab — allow pop-ups for this site, then use the Figures button.';
+document.querySelectorAll('.btn-figures').forEach((btn) => btn.addEventListener('click', () => {
+  if (!openFiguresWindow()) showToast(POPUP_BLOCKED, { open: false, ms: 8000 });
+}));
+toastOpen.addEventListener('click', () => { hideToast(); openFiguresWindow(); });
+document.getElementById('toast-close').addEventListener('click', () => hideToast());
+
+let toastTimer = null;
+function showToast(text, { open = true, ms = 5000 } = {}) {
+  toastText.textContent = text;
+  toastOpen.hidden = !open;
+  toastEl.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideToast, ms);
+}
+function hideToast() { clearTimeout(toastTimer); toastEl.hidden = true; }
+
+// type -> the capture currently filling that figure:
+// { demo, started, idPromise (-> figure id | null), chain (serialises writes) }
+const pendingFig = { logsum: null, bump: null, sweep: null, freevib: null };
+// A Log Summary result normally lands within ~10 s; past this the spinner is
+// dropped (a late result still becomes a figure -- see finishFigure).
+const LOGSUM_FIGURE_TIMEOUT_MS = 30000;
+
+// Call synchronously from the capture's click handler, before any await.
+function beginFigure(type, data = null) {
+  if (chkFiguresAuto.checked && !openFiguresWindow()) showToast(POPUP_BLOCKED, { open: false, ms: 8000 });
+  if (pendingFig[type]) dropFigure(type);
+  const demo = client.isDemo;
+  const status = type === 'sweep' ? 'running' : 'pending';
+  const p = { demo, started: false, idPromise: null, chain: null };
+  p.idPromise = createFigure({
+    type, status, demo, owner: HMI_SESSION, data, title: figureTitle(type, data, { demo, status }),
+  }).then((record) => {
+    postFigureMessage({ type: 'upsert', record, select: true });
+    return record.id;
+  }).catch((err) => { console.warn('[figures] could not create the figure:', err); return null; });
+  p.chain = p.idPromise.then(() => {});
+  pendingFig[type] = p;
+  if (type === 'logsum') {
+    setTimeout(() => { if (pendingFig.logsum === p) dropFigure('logsum'); }, LOGSUM_FIGURE_TIMEOUT_MS);
+  }
+}
+
+// The capture ended with nothing to show: remove its placeholder figure.
+function dropFigure(type) {
+  const p = pendingFig[type];
+  if (!p) return;
+  pendingFig[type] = null;
+  p.chain = p.chain.then(async () => {
+    const id = await p.idPromise;
+    if (id == null) return;
+    await deleteFigure(id);
+    postFigureMessage({ type: 'delete', id });
+  }).catch((err) => console.warn('[figures] could not remove the figure:', err));
+}
+
+// Live data for a figure still running (the sweep's points).
+function updatePendingFigure(type, data) {
+  const p = pendingFig[type];
+  if (!p) return;
+  const title = figureTitle(type, data, { demo: p.demo, status: 'running' });
+  p.chain = p.chain.then(async () => {
+    const id = await p.idPromise;
+    if (id == null) return;
+    const record = await updateFigure(id, { data, title });   // null if it was closed meanwhile
+    if (record) postFigureMessage({ type: 'upsert', record, select: false });
+  }).catch((err) => console.warn('[figures] could not update the figure:', err));
+}
+
+// The result arrived: fill the figure in. If it was closed in the Figures tab
+// meanwhile (or never got created), a finished capture is still kept -- as a
+// new figure, like MATLAB's plot() opening one when there is none.
+function finishFigure(type, data, { select = true } = {}) {
+  const p = pendingFig[type];
+  pendingFig[type] = null;
+  const demo = p ? p.demo : client.isDemo;
+  const fields = { status: 'done', data, title: figureTitle(type, data, { demo }), finishedAt: new Date().toISOString() };
+  (p ? p.chain : Promise.resolve()).then(async () => {
+    const id = p ? await p.idPromise : null;
+    let record = id != null ? await updateFigure(id, fields) : null;
+    if (!record) record = await createFigure({ type, demo, owner: HMI_SESSION, ...fields });
+    postFigureMessage({ type: 'upsert', record, select });
+    showToast(`Saved as Figure ${record.num} in the Figures tab.`);
+  }).catch((err) => {
+    console.warn('[figures] could not save the figure:', err);
+    appendLog(`[warn] This capture could not be saved to the Figures tab (${err?.message || err}).`);
+  });
+}
+
+// Live status text for a figure's spinner ("Receiving data… 3200 samples"),
+// at most a few per second. Sent from the data events, not the animation-frame
+// previews: those stop while the HMI tab is in the background.
+const progressSentAt = {};
+function progressFigure(type, text, { force = false } = {}) {
+  const p = pendingFig[type];
+  if (!p) return;
+  const now = performance.now();
+  if (!force && now - (progressSentAt[type] || 0) < 250) return;
+  progressSentAt[type] = now;
+  p.idPromise.then((id) => {
+    if (id != null && pendingFig[type] === p) postFigureMessage({ type: 'progress', id, text });
+  });
+}
+
+function sweepFigureData(aborted = false) {
+  return {
+    mode: currentRunDamped ? 'damped' : 'undamped',
+    points: currentSweepPoints.slice(),
+    resonanceHz: Number(sweepResonanceHz.value),
+    aborted,
+  };
+}
+function freevibFigureData(aborted = false) {
+  return {
+    samples: freevibSamples.slice(),
+    nominalSps: freevibNominalSps,
+    cutoffHz: Number(freevibCutoff.value) || 8,
+    aborted,
+  };
+}
+
+client.addEventListener('mode', (e) => {
+  const m = e.detail;
+  // "started" = the board really entered the capture (runBumpTest etc. first
+  // pass through busy/idle while stopping whatever was running).
+  if (pendingFig.bump && m.startsWith('bump')) pendingFig.bump.started = true;
+  if (pendingFig.freevib && m === 'freevib') pendingFig.freevib.started = true;
+  if (pendingFig.sweep && m === 'sweep') pendingFig.sweep.started = true;
+  if (m !== 'idle' && m !== 'disconnected') return;
+  // Back to idle without the result event (bump aborted while armed, a stop
+  // that timed out, the cable pulled): keep what's worth keeping.
+  if (pendingFig.bump?.started) dropFigure('bump');
+  if (pendingFig.freevib?.started) {
+    if (freevibSamples.length >= 8) finishFigure('freevib', freevibFigureData(true));
+    else dropFigure('freevib');
+  }
+  if (pendingFig.sweep?.started) {
+    if (currentSweepPoints.length) finishFigure('sweep', sweepFigureData(true), { select: false });
+    else dropFigure('sweep');
+  }
+  if (m === 'disconnected') dropFigure('logsum');   // its result can't arrive any more
+});
+
+// Figures left half-made by an HMI tab that was closed or reloaded mid-capture.
+reapOrphanFigures({ mySession: HMI_SESSION }).catch((err) => console.warn('[figures] orphan check failed:', err));
 
 // ============================================================
 // Apparatus panel image -- one reference render, swapped between deployed
@@ -357,21 +537,28 @@ const rpmTargetValue = document.getElementById('rpm-target-value');
 const rpmMeasuredValue = document.getElementById('rpm-measured-value');
 const rpmRawValue = document.getElementById('rpm-raw-value');
 const rpmDutyValue = document.getElementById('rpm-duty-value');
+// Live strip charts: MATLAB figures with tight x limits (the window scrolls
+// smoothly instead of jumping between rounded tick limits). Target is MATLAB's
+// second colour, dashed, so it reads as the setpoint under the measured trace.
 const rpmChart = new RollingChart(document.getElementById('rpm-chart'), {
   title: 'RPM: Target vs. Measured',
   yLabel: 'RPM',
   series: [
-    { label: 'Target RPM', color: '#9aa0a0' },
-    { label: 'Measured RPM', color: '#3ecf6e' },
+    { label: 'Target RPM', color: MATLAB_COLORS[1], lineStyle: '--' },
+    { label: 'Measured RPM', color: MATLAB_COLORS[0] },
   ],
   maxPoints: 400,
+  xTight: true,
+  legendLocation: 'northoutside',
+  exportName: 'RPM target vs measured',
 });
 const dutyChart = new RollingChart(document.getElementById('duty-chart'), {
   title: 'Commanded Duty',
   yLabel: 'Duty (0-255)',
-  series: [{ label: 'Duty', color: '#e0c341' }],
+  series: [{ label: 'Duty', color: MATLAB_COLORS[0] }],
   yMin: 0, yMax: 255, autoScaleY: false,
   maxPoints: 400,
+  xTight: true,
 });
 
 const RPM_MAX = 3400;
@@ -512,9 +699,10 @@ const ACCEL_WINDOW_S = 3;
 const accelChart = new RollingChart(document.getElementById('accel-chart'), {
   title: 'Vibration (live)',
   yLabel: 'Accel (g)',
-  series: [{ label: 'Accel (g)', color: '#3ecf6e' }],
+  series: [{ label: 'Accel (g)', color: MATLAB_COLORS[0] }],
   maxPoints: 500,
   windowSeconds: ACCEL_WINDOW_S,
+  xTight: true,
 });
 
 btnAccelStart.addEventListener('click', async () => {
@@ -561,9 +749,14 @@ client.addEventListener('vibration-live-sample', (e) => {
 // ============================================================
 // Log Summary (`log`, issued mid-`live`) -- the teaching capture.
 //
-// Deliberately shows RAW accel against RAW encoder pulses and asks the student
-// to measure pulse->peak themselves. The firmware's own answer is available,
-// but behind a Reveal button so the reading gets attempted first.
+// Plots the whole shipped window (1 s of the 5 s capture, on the capture's own
+// clock) as acceleration in m/s^2 against time in s, with the encoder pulses
+// redrawn as the old rig's rectangular proximity-probe trace, in a MATLAB-style
+// figure -- i.e. the Prak2.m "Detailed view" the practicum was taught with --
+// plus the FFT of the same capture. The student reads pulse -> trough (Δt) and
+// pulse -> pulse (T) with data tips and computes the phase themselves; the
+// firmware's own answer stays behind the Reveal button so the reading gets
+// attempted first.
 // ============================================================
 const btnLogsum = document.getElementById('btn-logsum');
 const btnCloseLogsum = document.getElementById('btn-close-logsum');
@@ -584,16 +777,33 @@ const logsumViewBtns = {
   sync: document.getElementById('logsum-view-sync'),
 };
 
-// x = time (s), y = accel (g). BodeChart rather than RollingChart: this is a
-// static XY slice, and its wheel-zoom/drag-pan/data-cursor are exactly what a
-// student needs to zoom to 2-3 cycles and read a peak off precisely.
+// x = time (s), y = acceleration (m/s²), drawn as a MATLAB figure (white axes,
+// '-b' accel, '-r' proximity pulse, clickable data tips) on purpose: it stands in
+// for Prak2.m's "Detailed view" --  plot(time,prox,'-r'); hold on;
+// plot(time,coeff*filtered_accel2,'-b')  -- so students and assistants read it
+// exactly the way they already read that figure. BodeChart rather than
+// RollingChart: this is a static XY slice, and its wheel-zoom/drag-pan/data tips
+// are what a student needs to zoom to 2-3 cycles and read an edge and a trough.
 const logsumChart = new BodeChart(document.getElementById('logsum-chart'), {
-  title: 'Accel vs. Time',
+  title: 'Acceleration and Proximity Pulse vs. Time',
   xLabel: 'Time (s)',
-  yLabel: 'Accel (g)',
+  yLabel: 'Acceleration (m/s²)',
+  // Legend above the axes: inside, it would sit on the pulse train or the trace.
+  legendLocation: 'northoutside',
+  exportName: 'Log Summary - acceleration and proximity pulse',
 });
+// The same capture's spectrum -- Prak2.m's FFT figure (xlim([0 100])): the
+// "is the response dominant at running speed?" check before trusting a phase.
+const logsumFftChart = new BodeChart(document.getElementById('logsum-fft-chart'), {
+  title: 'FFT Spectrum (raw signal)',
+  xLabel: 'Frequency (Hz)',
+  yLabel: 'Amplitude (m/s²)',
+  resonanceFormat: (hz) => `1× running speed = ${hz.toFixed(1)} Hz`,
+  exportName: 'Log Summary - FFT spectrum',
+});
+const btnLogsumClearTips = document.getElementById('btn-logsum-cleartips');
+const logsumFftStatus = document.getElementById('logsum-fft-status');
 
-let logsumPhaseDeg = NaN;   // the firmware's answer, held back until Reveal
 let lastLogsum = null;      // last capture, kept so the view can be re-rendered
 // 'raw' | 'lp' | 'sync'. Defaults to the low-pass: the raw ADXL trace carries
 // broadband noise across the ADS1220's whole ~1165 Hz band, which makes picking
@@ -603,134 +813,18 @@ let logsumView = 'lp';
 // Capture facts (sample count, rate, window) -- constant for a given capture.
 // renderLogsumTrace() appends what the current view did to it.
 let logsumBaseStatus = '';
-// How many copies of the averaged revolution the sync view lays out. One lone
-// cycle is technically all the information there is, but it gives the student a
-// single pulse->trough interval floating in isolation; a handful of repeats
-// reads like the raw trace they already know, so the same measurement (pick a
-// gold line, find the next trough) transfers over directly.
-const LOGSUM_SYNC_REVS = 6;
 
-// Pick `revs` consecutive revolutions from the middle of the capture, anchored
-// on encoder pulses, so the raw and low-pass views span exactly what the sync
-// view synthesises. Middle rather than start for a reason: filtfilt settles at
-// both ends of the record, and taking the centre keeps those edge transients
-// off screen. (Filtering always runs on the FULL record -- only the display is
-// windowed -- so the trace shown is never filtered from a truncated buffer.)
-// Asks for `wantRevs` but settles for however many the capture actually holds,
-// so a slow shaft (whose revolutions are long enough that only one or two fit
-// in the shipped window) degrades to showing those rather than falling out of
-// step with the other views. Returns null only if there isn't one whole
-// revolution to show.
-function logsumWindowRevs(pulses, tFirst, tLast, wantRevs) {
-  const inside = pulses.filter((p) => p >= tFirst && p <= tLast);
-  const totalRevs = inside.length - 1;
-  if (totalRevs < 1) return null;
-  const revs = Math.min(wantRevs, totalRevs);
-  const start = Math.max(0, Math.min(totalRevs - revs, Math.round((totalRevs - revs) / 2)));
-  return { start: inside[start], end: inside[start + revs], revs, totalRevs };
-}
-
-const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-
-// Both filters keep peak TIMES exact, which is the only reason either is
-// allowed near this screen -- the whole exercise is a timing measurement.
-//   lp   -- zero-phase Butterworth. Cutoff is set in HARMONICS of shaft speed,
-//           not Hz, because the tone being measured moves with RPM: a fixed Hz
-//           cutoff that works at 300 RPM would sit below the fundamental at
-//           3400. Keeping ~5 harmonics preserves the waveform's shape while
-//           discarding the decade of band above it that is pure noise.
-//   sync  -- time-synchronous average over the encoder pulses (see
-//           syncAverage): collapses the window to one clean revolution.
+// The drawing itself lives in logsum-plot.js, shared with the Figures tab so a
+// capture looks identical in both places.
 function renderLogsumTrace() {
   if (!lastLogsum) return;
-  const s = lastLogsum;
-  const t = s.samples.map((p) => p.time_s);
-  const y = s.samples.map((p) => p.accel_g);
-  const shaftHz = s.rpmAvg > 0 ? s.rpmAvg / 60 : 0;
-  const harmonics = clamp(Number(logsumHarmonics.value), 2, 40);
-
-  // The harmonics cutoff applies to BOTH filtered views (see the sync branch).
   logsumHarmonics.disabled = logsumView === 'raw';
-  const cutoffHz = harmonics * shaftHz;
-  const bandLimited = shaftHz > 0 ? lowpassFiltfilt(y, s.actualSps, cutoffHz) : y;
-
-  // Resolved once and shared by all three views -- it decides both how many
-  // revolutions the raw/low-pass traces are windowed to and how many times the
-  // sync view repeats its averaged revolution, which is what keeps the x-axis
-  // identical when switching between them.
-  const win = logsumWindowRevs(s.pulses, t[0], t[t.length - 1], LOGSUM_SYNC_REVS);
-  const shownRevs = win ? win.revs : 1;
-
-  let note = '';
-  if (logsumView === 'sync') {
-    // Average the BAND-LIMITED trace, not the raw one. Synchronous averaging
-    // rejects noise but not rotation-locked harmonics -- an 8x component is
-    // exactly as synchronous as the 1x, so it survives at full strength and
-    // leaves a ripple that makes the trough harder to pick out, which is the
-    // opposite of the point. Low-passing first removes the harmonics, the
-    // averaging then removes the noise, and the two are independent wins.
-    // Both stages are phase-preserving, so the trough still doesn't move.
-    const avg = syncAverage(t, bandLimited, s.pulses, { repeats: shownRevs });
-    if (avg) {
-      logsumChart.title =
-        `Accel vs. Time — ${plural(avg.revolutions, 'revolution')} averaged, shown ${avg.repeats}×`;
-      logsumChart.xLabel = 'Time (s, from an encoder pulse)';
-      logsumChart.setSeries('accel', avg.time.map((x, i) => ({ x, y: avg.accel[i] })),
-                            '#3ecf6e', 'Accel (g)', { markers: false });
-      // Every gold line is an encoder pulse by construction -- each marks one
-      // averaged revolution, so any pulse->trough pair reads the same phase.
-      logsumChart.setVLines(avg.pulseTimes);
-      logsumChart.resetZoom();
-      // Only claim a noise win when there was actually something to average:
-      // a lone revolution is just itself, repeated.
-      note = avg.revolutions > 1
-        ? `Sync-averaged over ${plural(avg.revolutions, 'revolution')} ` +
-          `(~${Math.sqrt(avg.revolutions).toFixed(1)}× less noise), band-limited to ` +
-          `${harmonics}× shaft speed, repeated ${avg.repeats}× — every cycle is identical, ` +
-          `so measure any pulse → next trough.`
-        : `Only one complete revolution in this window — nothing to average, ` +
-          `so this is that revolution band-limited to ${harmonics}× shaft speed.`;
-      logsumStatus.textContent = `${logsumBaseStatus} ${note}`;
-      return;
-    }
-    // Fewer than one whole revolution in the window (very low RPM, or a stalled
-    // rotor) -- nothing to average, so show raw rather than an empty plot.
-    note = 'Not enough complete revolutions to sync-average — showing raw.';
-  }
-
-  let plotted = y;
-  if (logsumView === 'lp' && shaftHz > 0) {
-    plotted = bandLimited;
-    note = `Low-pass ${cutoffHz.toFixed(0)} Hz (${harmonics}× shaft speed), zero-phase.`;
-  } else if (logsumView === 'lp') {
-    note = 'No measurable RPM — showing raw.';
-  }
-
-  // Show the same span the sync view does -- same number of revolutions, same
-  // pulse-anchored origin -- so switching between the three changes the TRACE
-  // and nothing else. Without this the eye has to re-find its place on a
-  // different time axis every time, which defeats comparing them.
-  logsumChart.title = 'Accel vs. Time';
-  const pts = [];
-  if (win) {
-    for (let i = 0; i < t.length; i++) {
-      if (t[i] >= win.start && t[i] <= win.end) pts.push({ x: t[i] - win.start, y: plotted[i] });
-    }
-    logsumChart.xLabel = 'Time (s, from an encoder pulse)';
-    logsumChart.setVLines(s.pulses.filter((p) => p >= win.start && p <= win.end)
-                                  .map((p) => p - win.start));
-    if (win.revs < win.totalRevs) {
-      note = `${note} Showing ${win.revs} of ${plural(win.totalRevs, 'revolution')}.`.trim();
-    }
-  } else {
-    // Not enough whole revolutions to window (very low RPM) -- show everything.
-    for (let i = 0; i < t.length; i++) pts.push({ x: t[i], y: plotted[i] });
-    logsumChart.xLabel = 'Time (s)';
-    logsumChart.setVLines(s.pulses);
-  }
-  logsumChart.setSeries('accel', pts, '#3ecf6e', 'Accel (g)', { markers: false });
-  logsumChart.resetZoom();
+  const note = drawLogsumTrace(logsumChart, lastLogsum, { view: logsumView, harmonics: logsumHarmonics.value });
   logsumStatus.textContent = `${logsumBaseStatus} ${note}`.trim();
+}
+
+function renderLogsumFft(s) {
+  logsumFftStatus.textContent = drawLogsumSpectrum(logsumFftChart, s);
 }
 
 function setLogsumView(view) {
@@ -748,13 +842,19 @@ for (const [k, btn] of Object.entries(logsumViewBtns)) {
 // 'change' not 'input' -- re-filtering ~2330 samples per keystroke is wasted work.
 // Applies to the sync view too: it band-limits before averaging.
 logsumHarmonics.addEventListener('change', () => { if (logsumView !== 'raw') renderLogsumTrace(); });
+btnLogsumClearTips.addEventListener('click', () => { logsumChart.clearTips(); logsumFftChart.clearTips(); });
 
 btnLogsum.addEventListener('click', async () => {
   btnLogsum.disabled = true;
+  beginFigure('logsum');
   openModal('modal-logsum');
   logsumChart.resize();
-  logsumChart.clear();
+  logsumChart.clear();        // also drops any data tips from the last capture
   logsumChart.setVLines([]);
+  logsumFftChart.resize();
+  logsumFftChart.clear();
+  logsumFftChart.setResonanceX(null);
+  logsumFftStatus.textContent = '';
   lastLogsum = null;          // don't let a view switch re-render the previous capture
   logsumBaseStatus = '';
   logsumStatus.textContent = 'Recording 5 s at full rate…';
@@ -770,6 +870,7 @@ btnLogsum.addEventListener('click', async () => {
     appendLog('[error] ' + err.message);
     logsumStatus.textContent = err.message;
     btnLogsum.disabled = false;
+    dropFigure('logsum');
   }
 });
 
@@ -777,53 +878,32 @@ btnCloseLogsum.addEventListener('click', () => closeModal('modal-logsum'));
 
 client.addEventListener('logsum-result', (e) => {
   const s = e.detail;
-  logsumPhaseDeg = s.phaseDeg;
   lastLogsum = s;
 
   const T_ms = s.rpmAvg > 0 ? 60000 / s.rpmAvg : NaN;
   logsumRpm.textContent = s.rpmAvg.toFixed(1);
-  logsumAmp.textContent = s.ampG.toFixed(4);
+  logsumAmp.textContent = (s.ampG * G_TO_MS2).toFixed(3);
   logsumPeriod.textContent = isFinite(T_ms) ? T_ms.toFixed(1) : '—';
   logsumPulses.textContent = String(s.pulses.length);
 
-  logsumBaseStatus =
-    `${s.samples.length} samples @ ${s.actualSps.toFixed(0)} SPS ` +
-    `(${(s.samples.length / s.actualSps).toFixed(2)} s of ${s.durationS.toFixed(0)} s, ` +
-    `from t=${s.windowStartS.toFixed(2)} s).`;
+  logsumBaseStatus = logsumCaptureFacts(s);
   renderLogsumTrace();   // draws the trace and appends what it did to the status
+  renderLogsumFft(s);
 
   btnLogsumReveal.disabled = !isFinite(s.phaseDeg);
   btnLogsum.disabled = client.mode !== 'live';
+  finishFigure('logsum', s);
 });
 
-// The firmware's lock-in correlates the ACCEL signal, so its raw phase is
-// "pulse -> accel peak". The encoder fires at maximum displacement, which is the
-// accel TROUGH (a = -w^2 * x inverts the signal), 180 deg away. Subtracting that
-// 180 gives the displacement-referenced phase: the textbook 0 -> 90 -> 180
-// number, and exactly what a student measures reading pulse -> trough.
-//
-// Any offset left after this is sensor mounting angle, unknowable from one
-// capture -- which is precisely what the Bode plot's low-RPM normalisation
-// exists to remove.
-function displacementPhaseDeg(rawDeg) {
-  // Wrap into [-90, 270) rather than [0, 360) so the physical 0-180 band stays
-  // contiguous: a reading a hair below zero shows as -2 deg (obviously "≈0")
-  // instead of flipping to 358.
-  return ((rawDeg - 180 + 90) % 360 + 360) % 360 - 90;
-}
-
+// The revealed number is the displacement-referenced phase (firmware raw phase
+// minus the 180 deg accel-vs-displacement inversion) -- see logsum-plot.js.
 btnLogsumReveal.addEventListener('click', () => {
-  if (!isFinite(logsumPhaseDeg)) return;
-  const T_ms = Number(logsumPeriod.textContent);
-  const disp = displacementPhaseDeg(logsumPhaseDeg);
-  const dt_ms = isFinite(T_ms) ? (disp / 360) * T_ms : NaN;
-
-  logsumAnswer.textContent = isFinite(dt_ms)
-    ? `${disp.toFixed(1)}°  (Δt ≈ ${dt_ms.toFixed(1)} ms, pulse → trough)`
-    : `${disp.toFixed(1)}°`;
+  const r = logsumRevealText(lastLogsum);
+  if (!r) return;
+  logsumAnswer.textContent = r.main;
   // Shown smaller/dimmer: it's the provenance of the number above, not the
   // answer the student is checking against.
-  logsumAnswerRaw.textContent = `raw (pulse → accel peak): ${logsumPhaseDeg.toFixed(1)}°`;
+  logsumAnswerRaw.textContent = r.raw;
 
   logsumAnswerNote.hidden = false;
   logsumRawNote.hidden = false;
@@ -938,6 +1018,7 @@ const sweepChart = new BodeChart(document.getElementById('sweep-chart'), {
   xLabel: 'RPM (measured)',
   yLabel: 'Accel Amplitude (g, 1×RPM)',
   resonanceX: Number(sweepResonanceHz.value) * 60, // Hz -> RPM (shaft speed), matches PCB1's ~22.1 Hz / 1326 RPM natural frequency
+  exportName: 'Sweep - amplitude vs RPM',
 });
 
 // Phase plot, stacked under the amplitude Bode plot and sharing its RPM
@@ -951,8 +1032,12 @@ const sweepPhaseChart = new BodeChart(document.getElementById('sweep-phase-chart
   yLabel: 'Phase lag (deg)',
   resonanceX: Number(sweepResonanceHz.value) * 60,
   yFixed: { min: -30, max: 210 },
+  yTicks: [-30, 0, 30, 60, 90, 120, 150, 180, 210],
   refY: 90,
+  exportName: 'Sweep - phase vs RPM',
 });
+// Same RPM axis on both plots: zooming/panning one moves the other (MATLAB linkaxes x).
+sweepChart.linkX(sweepPhaseChart);
 
 // Resonance line is user-adjustable (defaults to 22.1 Hz per PCB1's
 // SYSTEM_OVERVIEW.md) since the true peak can shift as the apparatus is
@@ -964,77 +1049,8 @@ sweepResonanceHz.addEventListener('input', () => {
   sweepPhaseChart.setResonanceX(rpm);
 });
 
-// ---- Phase normalisation ----
-// The firmware reports RAW phase: the true response lag plus a fixed offset
-// from the sensor mounting angle and from measuring acceleration rather than
-// displacement (accel = -w^2 * x, a flat 180 deg). That offset is constant
-// across RPM, so instead of calibrating it we exploit the physics: for
-// rotating unbalance the lag tends to 0 well below resonance. Averaging the
-// far-below-resonance points and subtracting gives a self-calibrating zero
-// that survives someone re-mounting the sensor.
-//
-// 1000 RPM is r = f/fn ~ 0.75, where the true lag is still only ~2 deg for
-// light damping -- close enough to zero to use as the reference, while being
-// high enough to include several points with usable signal.
-const PHASE_ZERO_MAX_RPM = 1000;
-// Below this ratio of (1x lock-in amplitude) / (broadband RMS amplitude), the
-// 1x tone is buried in the noise floor and the lock-in's ANGLE is meaningless
-// even though it still returns a number. Same underlying reason amp_1x exists
-// at all. Such points are plotted faded rather than dropped.
-const PHASE_MIN_TONE_RATIO = 0.35;
-
-function circularMeanDeg(degs) {
-  let c = 0, s = 0;
-  for (const d of degs) {
-    const r = (d * Math.PI) / 180;
-    c += Math.cos(r); s += Math.sin(r);
-  }
-  if (c === 0 && s === 0) return NaN;
-  return (Math.atan2(s, c) * 180) / Math.PI;
-}
-
-// Wrap into [lo, lo+360). lo = -90 keeps the physical 0-180 band contiguous,
-// so a point sitting near 180 can't flip to -180 and tear the trace.
-function wrapPhase(deg, lo = -90) {
-  let d = (deg - lo) % 360;
-  if (d < 0) d += 360;
-  return d + lo;
-}
-
-function phaseZeroOffset(points) {
-  const valid = points.filter((p) => isFinite(p.phase_deg));
-  if (!valid.length) return NaN;
-  let ref = valid.filter((p) => p.rpm_avg < PHASE_ZERO_MAX_RPM);
-  if (!ref.length) {
-    // No far-below-resonance points (an aborted run, or a loaded partial that
-    // never went low). Fall back to the lowest-RPM point as an approximate
-    // zero -- worse the closer it sits to resonance, but better than leaving
-    // an arbitrary raw offset on the plot.
-    ref = [valid.reduce((a, b) => (a.rpm_avg <= b.rpm_avg ? a : b))];
-  }
-  return circularMeanDeg(ref.map((p) => p.phase_deg));
-}
-
-// Build the normalised {x,y,dim} series for a set of raw sweep points.
-// Recomputed from scratch on every new live point rather than appended to:
-// the zero offset itself sharpens as more low-RPM points arrive, and it has
-// to be applied to the whole trace, not just the newest point.
-function phaseSeriesFor(points) {
-  const offset = phaseZeroOffset(points);
-  if (!isFinite(offset)) return [];
-  return points
-    .filter((p) => isFinite(p.phase_deg))
-    .map((p) => {
-      const toneRatio = p.accel_amplitude_g > 0 ? p.accel_amp_1x_g / p.accel_amplitude_g : 0;
-      return {
-        x: p.rpm_avg,
-        y: wrapPhase(p.phase_deg - offset),
-        dim: toneRatio < PHASE_MIN_TONE_RATIO,
-      };
-    });
-}
-const SWEEP_LIVE_COLOR = '#3ecf6e';
-const SWEEP_OVERLAY_COLORS = ['#e0c341', '#5aa9e6', '#e0704a', '#b57edc', '#4ad9c1', '#e05a8f'];
+const SWEEP_LIVE_COLOR = MATLAB_COLORS[0];
+const SWEEP_OVERLAY_COLORS = MATLAB_COLORS.slice(1);
 let sweepOverlayColorIdx = 0;
 let currentSweepPoints = []; // full point objects (all CSV fields), for Save -- the chart only keeps {x,y}
 
@@ -1153,6 +1169,7 @@ btnSweepStart.addEventListener('click', async () => {
   sweepPhaseChart.removeSeries('live');
   currentSweepPoints = [];
   currentRunDamped = sweepDamped;
+  beginFigure('sweep', sweepFigureData());
   btnSweepSave.disabled = true;
   sweepStatus.textContent = `Sweeping ${currentRunDamped ? 'damped (r2)' : 'undamped (r)'}…`;
   try {
@@ -1161,6 +1178,7 @@ btnSweepStart.addEventListener('click', async () => {
     appendLog('[error] ' + err.message);
     btnSweepStart.disabled = false;
     sweepStatus.textContent = '';
+    dropFigure('sweep');
   }
 });
 
@@ -1187,33 +1205,8 @@ client.addEventListener('sweep-point', (e) => {
   if (s.rpm_std > SWEEP_RPM_STD_TOL) {
     appendLog(`[warn] ${s.rpm_avg.toFixed(0)} RPM: rotor hunting (rpm_std ${s.rpm_std.toFixed(1)}) -- amplitude and phase not steady-state`);
   }
+  updatePendingFigure('sweep', sweepFigureData());
 });
-
-// Resonance estimate from the phase curve's 90 deg crossing. For rotating
-// unbalance the response lag passes through exactly 90 deg AT the natural
-// frequency whatever the damping, which makes this a sharper estimator than
-// the amplitude peak -- that peak sits slightly ABOVE fn (the m*e*w^2 forcing
-// grows with speed) and is noise-biased where the tone is weak. Linearly
-// interpolates the two trustworthy points straddling 90.
-function resonanceFromPhase(points) {
-  const pts = phaseSeriesFor(points).filter((p) => !p.dim).sort((a, b) => a.x - b.x);
-  for (let i = 1; i < pts.length; i++) {
-    if (pts[i - 1].y < 90 && pts[i].y >= 90) {
-      const t = (90 - pts[i - 1].y) / (pts[i].y - pts[i - 1].y);
-      const rpm = pts[i - 1].x + t * (pts[i].x - pts[i - 1].x);
-      // How far apart the straddling points are: on the undamped beam the
-      // crossing can fall inside the sweep's no-dwell gap (default 1325-1350,
-      // runtime-adjustable via `gap <lo> <hi>` -- see app.js's gap controls),
-      // and interpolating across it is much cruder than across a 5 RPM fine
-      // step. Fine-band steps are 5 RPM, the default gap spans 25, so 10
-      // separates them -- see the `> 10` check below. A gap widened well past
-      // the default via `gap` could still slip under this fixed threshold;
-      // it's a heuristic, not a hard guarantee.
-      return { rpm, spanRpm: pts[i].x - pts[i - 1].x };
-    }
-  }
-  return null;
-}
 
 client.addEventListener('sweep-done', (e) => {
   const { aborted } = e.detail;
@@ -1230,6 +1223,10 @@ client.addEventListener('sweep-done', (e) => {
   }
   sweepStatus.textContent = base + extra;
   btnSweepSave.disabled = currentSweepPoints.length === 0;
+  // The figure has been filling in live; at the end it's only finalised (not
+  // brought to the front), in case the Figures tab is showing something else.
+  if (currentSweepPoints.length) finishFigure('sweep', sweepFigureData(aborted), { select: false });
+  else dropFigure('sweep');
 });
 
 btnSweepSave.addEventListener('click', () => {
@@ -1299,14 +1296,14 @@ const bumpStatus = document.getElementById('bump-status');
 const bumpTimeChart = new RollingChart(document.getElementById('bump-time-chart'), {
   title: 'Bump Test — Time Domain',
   yLabel: 'Accel (g)',
-  series: [{ label: 'Accel (g)', color: '#3ecf6e' }],
+  series: [{ label: 'Accel (g)', color: MATLAB_COLORS[0] }],
   maxPoints: 40000, // one-shot bounded capture (<=15s @ ~2330 SPS), not a continuously-live feed
 });
 const bumpFftChart = new RollingChart(document.getElementById('bump-fft-chart'), {
   title: 'Bump Test — FFT Spectrum',
   xLabel: 'Frequency (Hz)',
   yLabel: 'Accel (g)',
-  series: [{ label: 'FFT Amplitude', color: '#5aa9e6' }],
+  series: [{ label: 'FFT Amplitude', color: '#0000ff' }],   // Prak2.m: plot(freqB,MagnB,'-b')
   maxPoints: 10000,
   xScale: 1, // freq is already in Hz, not milliseconds
 });
@@ -1321,6 +1318,7 @@ btnBumpStart.addEventListener('click', async () => {
   const thresholdG = clamp(Number(bumpThreshold.value), 0.01, 10);
   const durationS = Math.round(clamp(Number(bumpDuration.value), 1, 15));
   btnBumpStart.disabled = true;
+  beginFigure('bump', { thresholdG, durationS });
   btnBumpSave.disabled = true;
   bumpTimeChart.clear();
   bumpFftChart.clear();
@@ -1331,6 +1329,7 @@ btnBumpStart.addEventListener('click', async () => {
     appendLog('[error] ' + err.message);
     btnBumpStart.disabled = false;
     bumpStatus.textContent = '';
+    dropFigure('bump');
   }
 });
 
@@ -1339,8 +1338,15 @@ btnBumpStop.addEventListener('click', async () => {
   await client.stop();
 });
 
+// True while the dump is streaming in. The per-frame preview below checks it so
+// a frame that fires after bump-result can't overwrite the "Done" status with
+// "Receiving data…" (the last rows and the result arrive in the same burst).
+let bumpReceiving = false;
+
 client.addEventListener('bump-triggered', (e) => {
+  bumpReceiving = true;
   bumpStatus.textContent = `Triggered at ${e.detail.accelG.toFixed(3)} g -- capturing…`;
+  progressFigure('bump', `Triggered at ${e.detail.accelG.toFixed(3)} g — receiving the capture…`, { force: true });
   // The ~11k-row dump is about to arrive: accumulate points without a redraw
   // per row (see RollingChart.beginBatch). A throttled preview redraw happens
   // in bump-sample; the final full-resolution draw is in bump-result.
@@ -1351,12 +1357,14 @@ let bumpPreviewScheduled = false;
 client.addEventListener('bump-sample', (e) => {
   const s = e.detail;
   bumpTimeChart.push(s.time_s * 1000, s.accel_g); // batched: no draw here
+  progressFigure('bump', `Receiving data… (${bumpTimeChart.t.length} samples so far)`);
   // Coalesce the status text + live preview redraw to one per animation frame,
   // instead of once per row, so streaming the dump can't stall the read loop.
   if (!bumpPreviewScheduled) {
     bumpPreviewScheduled = true;
     requestAnimationFrame(() => {
       bumpPreviewScheduled = false;
+      if (!bumpReceiving) return;
       bumpStatus.textContent = `Receiving data… (${bumpTimeChart.t.length} samples so far)`;
       bumpTimeChart.draw();
     });
@@ -1364,6 +1372,7 @@ client.addEventListener('bump-sample', (e) => {
 });
 
 client.addEventListener('bump-result', (e) => {
+  bumpReceiving = false;
   lastBumpResult = e.detail;
   const { raw, actualSps, peakG } = lastBumpResult;
   bumpTimeChart.endBatch(); // final full-resolution draw of the time domain
@@ -1380,6 +1389,12 @@ client.addEventListener('bump-result', (e) => {
   bumpFftChart.setPeaks(findPeaks(boundedFreq, boundedAmplitude));
   bumpStatus.textContent = `Done -- ${raw.length} samples, peak ${peakG.toFixed(3)} g.`;
   btnBumpSave.disabled = false;
+  finishFigure('bump', {
+    // Only what the figure plots (the full rows stay with Save Run): keeps a
+    // 15 s capture's stored figure to a fraction of its raw size.
+    raw: raw.map((r) => ({ time_s: r.time_s, accel_g: r.accel_g })),
+    actualSps, peakG, thresholdG: lastBumpResult.thresholdG, biasV: lastBumpResult.biasV,
+  });
 });
 
 btnBumpSave.addEventListener('click', () => {
@@ -1417,14 +1432,13 @@ const freevibAnswerNote = document.getElementById('freevib-answer-note');
 const freevibCutoff = document.getElementById('freevib-cutoff');
 const freevibShowRaw = document.getElementById('freevib-show-raw');
 
-const FREEVIB_FMIN_HZ = 0.5;    // ignore sub-0.5 Hz drift when hunting the mode
 const FREEVIB_FFT_MAX_HZ = 15;  // display/search ceiling -- the rig rings ~2.5 Hz
 
 const freevibTimeChart = new RollingChart(document.getElementById('freevib-time-chart'), {
   title: 'Free Vibration — Ring-down',
   xLabel: 'Time (s)',
   yLabel: 'Accel (g)',
-  series: [{ label: 'Accel (g)', color: '#3ecf6e' }],
+  series: [{ label: 'Accel (g)', color: MATLAB_COLORS[0] }],
   maxPoints: 20000, // 60 s max * 200 SPS = 12000 samples
   xScale: 1,        // x is already in seconds (F rows carry t_s directly)
 });
@@ -1432,7 +1446,7 @@ const freevibFftChart = new RollingChart(document.getElementById('freevib-fft-ch
   title: 'Free Vibration — FFT Spectrum',
   xLabel: 'Frequency (Hz)',
   yLabel: 'Accel (g)',
-  series: [{ label: 'FFT Amplitude', color: '#5aa9e6' }],
+  series: [{ label: 'FFT Amplitude', color: '#0000ff' }],
   maxPoints: 20000,
   xScale: 1, // freq already in Hz
 });
@@ -1442,6 +1456,9 @@ let freevibNominalSps = NaN;
 let freevibEffSps = NaN;
 let freevibFilteredG = null; // zero-phase low-pass of the raw accel -- the trace measured + analysed
 let lastFreeVibAnalysis = null;
+// True while F rows are streaming; see bumpReceiving for why the preview checks it.
+let freevibRecording = false;
+let freevibDurationS = NaN;  // requested record time of the current run (for the figure's progress text)
 
 btnOpenFreeVib.addEventListener('click', () => {
   openModal('modal-freevib');
@@ -1453,6 +1470,7 @@ btnCloseFreeVib.addEventListener('click', () => closeModal('modal-freevib'));
 btnFreeVibStart.addEventListener('click', async () => {
   const durationS = Math.round(clamp(Number(freevibDuration.value), 2, 60));
   btnFreeVibStart.disabled = true;
+  beginFigure('freevib', { durationS });
   btnFreeVibSave.disabled = true;
   btnFreeVibReveal.disabled = true;
   freevibAnswer.textContent = '';
@@ -1465,6 +1483,8 @@ btnFreeVibStart.addEventListener('click', async () => {
   freevibFftChart.clear();
   freevibFftChart.setPeaks([]);
   freevibTimeChart.beginBatch();
+  freevibRecording = true;   // also set on freevib-start; set here too in case the board never sends it
+  freevibDurationS = durationS;
   freevibStatus.textContent = `Recording ${durationS} s — deflect the beam and let go now…`;
   try {
     await client.runFreeVib(durationS);
@@ -1473,6 +1493,7 @@ btnFreeVibStart.addEventListener('click', async () => {
     freevibTimeChart.endBatch();
     freevibStatus.textContent = err.message;
     btnFreeVibStart.disabled = client.mode !== 'idle';
+    dropFigure('freevib');
   }
 });
 
@@ -1483,6 +1504,7 @@ btnFreeVibStop.addEventListener('click', async () => {
 
 client.addEventListener('freevib-start', (e) => {
   freevibNominalSps = e.detail.sps;
+  freevibRecording = true;
 });
 
 let freevibPreviewScheduled = false;
@@ -1490,10 +1512,13 @@ client.addEventListener('freevib-sample', (e) => {
   const s = e.detail;
   freevibSamples.push(s);
   freevibTimeChart.push(s.time_s, s.accel_g); // batched: no draw here
+  progressFigure('freevib', `Recording… ${s.time_s.toFixed(1)}${isFinite(freevibDurationS) ? ` of ${freevibDurationS}` : ''} s` +
+    (s.time_s < 1.5 ? ' — deflect the beam and let go.' : ''));
   if (!freevibPreviewScheduled) {
     freevibPreviewScheduled = true;
     requestAnimationFrame(() => {
       freevibPreviewScheduled = false;
+      if (!freevibRecording) return;
       freevibStatus.textContent = `Recording… (${freevibSamples.length} samples, ${(freevibSamples.at(-1)?.time_s ?? 0).toFixed(1)} s)`;
       freevibTimeChart.draw();
     });
@@ -1501,6 +1526,7 @@ client.addEventListener('freevib-sample', (e) => {
 });
 
 client.addEventListener('freevib-done', (e) => {
+  freevibRecording = false;
   freevibTimeChart.endBatch(); // flush the live (raw) preview
   const n = freevibSamples.length;
   if (n < 8) {
@@ -1508,12 +1534,14 @@ client.addEventListener('freevib-done', (e) => {
       ? `Aborted — only ${n} samples, too few to analyse.`
       : `Done — only ${n} samples captured.`;
     btnFreeVibStart.disabled = client.mode !== 'idle';
+    dropFigure('freevib');
     return;
   }
   const base = e.detail.aborted ? `Aborted — kept ${n} samples` : `Done — ${n} samples`;
   analyzeAndRenderFreeVib(base);
   btnFreeVibSave.disabled = false;
   btnFreeVibStart.disabled = client.mode !== 'idle';
+  finishFigure('freevib', freevibFigureData(e.detail.aborted));
 });
 
 // Re-filter + re-analyse when the cutoff changes (only post-capture -- during a
@@ -1609,74 +1637,6 @@ btnFreeVibSave.addEventListener('click', () => {
   downloadJson(payload, `${filenamePrefix(label)}FreeVib_${wibTimestamp()}.json`);
 });
 
-// Peak-based analysis of a free-vibration ring-down: damped natural frequency
-// (from peak spacing), logarithmic decrement (from a straight-line fit of
-// ln(peak amplitude) vs. cycle index), and the derived damping ratio + undamped
-// natural frequency. Returns { ok, reason, fd, fn, zeta, delta, nPeaks,
-// fftPeakHz }. The cursor-based hand measurement is the primary path for
-// students; this is the "reveal" cross-check.
-// `t` and `g` are parallel arrays; `g` is the low-pass-filtered accel (cleaner
-// peaks than raw). `effSps` is the measured sample rate.
-function analyzeFreeVibration(t, g, effSps, bandF, bandA) {
-  // Detrend (remove any residual DC so peaks are about the true zero line).
-  const mean = g.reduce((s, v) => s + v, 0) / g.length;
-  const gd = g.map((v) => v - mean);
-
-  // Dominant frequency from the FFT band (fallback if peak timing fails, and a
-  // reported cross-check regardless).
-  let fftPeakHz = NaN, maxA = -Infinity;
-  for (let i = 0; i < bandF.length; i++) {
-    if (bandF[i] >= FREEVIB_FMIN_HZ && bandA[i] > maxA) { maxA = bandA[i]; fftPeakHz = bandF[i]; }
-  }
-  if (!isFinite(fftPeakHz) || fftPeakHz <= 0) {
-    return { ok: false, reason: 'No clear spectral peak', fftPeakHz: NaN };
-  }
-
-  // Positive-peak picker: one local max per cycle, above a noise floor, spaced
-  // at least ~60% of the estimated period apart (kills double-detections on
-  // noisy crests). minDt from the FFT estimate.
-  let maxAbs = 0;
-  for (const v of gd) maxAbs = Math.max(maxAbs, Math.abs(v));
-  const floor = 0.08 * maxAbs;
-  const minDt = 0.6 / fftPeakHz;
-  const peaks = [];
-  for (let i = 1; i < gd.length - 1; i++) {
-    if (gd[i] > floor && gd[i] >= gd[i - 1] && gd[i] > gd[i + 1]) {
-      const last = peaks[peaks.length - 1];
-      if (last && t[i] - last.t < minDt) {
-        if (gd[i] > last.a) { last.t = t[i]; last.a = gd[i]; } // keep the taller of two too-close crests
-      } else {
-        peaks.push({ t: t[i], a: gd[i] });
-      }
-    }
-  }
-  if (peaks.length < 3) {
-    return { ok: false, reason: `Only ${peaks.length} clean peaks (need ≥3)`, fftPeakHz };
-  }
-
-  // Damped period + frequency from mean peak-to-peak spacing.
-  let dtSum = 0;
-  for (let i = 1; i < peaks.length; i++) dtSum += peaks[i].t - peaks[i - 1].t;
-  const Td = dtSum / (peaks.length - 1);
-  const fd = Td > 0 ? 1 / Td : NaN;
-
-  // Logarithmic decrement: least-squares slope of ln(amplitude) vs. cycle index.
-  // δ = -slope. Robust across many cycles vs. a single x0/xn pair.
-  const N = peaks.length;
-  let sx = 0, sy = 0, sxy = 0, sxx = 0;
-  for (let i = 0; i < N; i++) {
-    const y = Math.log(peaks[i].a);
-    sx += i; sy += y; sxy += i * y; sxx += i * i;
-  }
-  const slope = (N * sxy - sx * sy) / (N * sxx - sx * sx);
-  const delta = -slope;
-  if (!(delta > 0) || !isFinite(fd)) {
-    return { ok: false, reason: 'Ring-down not decaying cleanly', fftPeakHz, fd };
-  }
-  const zeta = delta / Math.sqrt(4 * Math.PI * Math.PI + delta * delta);
-  const fn = fd / Math.sqrt(Math.max(1e-9, 1 - zeta * zeta));
-  return { ok: true, reason: '', fd, fn, zeta, delta, nPeaks: N, fftPeakHz };
-}
 
 // Bandung/WIB is UTC+7 (no DST) -- computed explicitly rather than relying on
 // the browser/OS timezone, so saved run filenames stay consistent regardless

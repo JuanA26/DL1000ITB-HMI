@@ -112,12 +112,21 @@ export function syncAverage(t, y, pulses, { maxPoints = 2048, repeats = 1 } = {}
   // Only revolutions wholly inside the captured window -- a partial one at
   // either end would average a fragment against full revolutions.
   const ps = [...pulses].sort((a, b) => a - b);
-  const revs = [];
+  let revs = [];
   for (let i = 0; i + 1 < ps.length; i++) {
     const a = ps[i], b = ps[i + 1];
     if (b > a && a >= t0 && b <= tEnd) revs.push([a, b]);
   }
   if (!revs.length) return null;
+  // Drop "revolutions" far from the median length. A missed encoder pulse makes
+  // one interval two revolutions long (a doubled pulse, half as long), and
+  // normalising that onto one cycle would smear two cycles into the average.
+  // Real speed wander is a few percent, so +/-25% only ever catches glitches --
+  // on clean data nothing is dropped and the result is unchanged.
+  const lens = revs.map(([a, b]) => b - a).sort((a, b) => a - b);
+  const medLen = lens[Math.floor(lens.length / 2)];
+  const steady = revs.filter(([a, b]) => Math.abs(b - a - medLen) <= 0.25 * medLen);
+  if (steady.length) revs = steady;
 
   const period = revs.reduce((s, [a, b]) => s + (b - a), 0) / revs.length;
   // One output point per input sample of an average revolution: finer would

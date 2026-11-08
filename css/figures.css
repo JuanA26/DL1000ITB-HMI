@@ -1,0 +1,111 @@
+/* Figures tab -- styled after MATLAB's Figures window: light grey window
+   chrome, a strip of figure tabs, white figures. Always light (MATLAB figures
+   are), independent of the HMI's light/dark toggle. */
+:root {
+  --fig-bg: #f0f0f0;
+  --fig-panel: #ffffff;
+  --fig-border: #c8c8c8;
+  --fig-text: #1f1f1f;
+  --fig-dim: #5f5f5f;
+  --fig-accent: #0072bd;
+  --fig-tab: #e2e2e2;
+  --fig-tab-hover: #ececec;
+  font-family: "Segoe UI", Helvetica, Arial, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--fig-bg); color: var(--fig-text); font-size: 14px; display: flex; flex-direction: column; }
+
+.fig-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  padding: 0.45rem 1rem; background: #fafafa; border-bottom: 1px solid var(--fig-border);
+}
+.fig-brand { display: flex; align-items: baseline; gap: 0.6rem; }
+.fig-logo {
+  width: 16px; height: 16px; align-self: center; border-radius: 2px;
+  background: linear-gradient(135deg, #0072bd 0 48%, #d95319 52% 100%);
+}
+.fig-brand-title { font-weight: 600; font-size: 1.05rem; }
+.fig-brand-sub { color: var(--fig-dim); font-size: 0.85rem; }
+.fig-actions { display: flex; align-items: center; gap: 0.75rem; }
+.fig-count { color: var(--fig-dim); font-size: 0.85rem; }
+
+.fig-btn {
+  font: inherit; font-size: 0.85rem; padding: 0.3rem 0.75rem; cursor: pointer;
+  background: #fdfdfd; color: var(--fig-text); border: 1px solid #adadad; border-radius: 3px;
+}
+.fig-btn:hover:not(:disabled) { background: #e5f1fb; border-color: #0078d7; }
+.fig-btn:disabled { color: #9a9a9a; border-color: #cfcfcf; cursor: default; }
+.fig-btn.confirm { background: #fdecea; border-color: #c62828; color: #b71c1c; }
+
+/* ---- Figure tabs ---- */
+.fig-tabs {
+  display: flex; gap: 2px; overflow-x: auto; padding: 0.35rem 0.6rem 0;
+  background: var(--fig-bg); border-bottom: 1px solid var(--fig-border); min-height: 2.2rem;
+}
+.fig-tab {
+  display: flex; align-items: center; gap: 0.45rem; flex: 0 0 auto; max-width: 340px;
+  padding: 0.3rem 0.4rem 0.3rem 0.7rem; cursor: pointer; user-select: none;
+  background: var(--fig-tab); border: 1px solid var(--fig-border); border-bottom: none;
+  border-radius: 4px 4px 0 0; font-size: 0.82rem; color: #333;
+}
+.fig-tab:hover { background: var(--fig-tab-hover); }
+.fig-tab.active { background: var(--fig-panel); color: #000; box-shadow: inset 0 2px 0 var(--fig-accent); }
+.fig-tab-num { font-weight: 600; white-space: nowrap; }
+.fig-tab-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #555; }
+.fig-tab.pending .fig-tab-title { font-style: italic; }
+.fig-tab-close {
+  border: none; background: transparent; cursor: pointer; font-size: 1rem; line-height: 1;
+  width: 1.2rem; height: 1.2rem; border-radius: 3px; color: #666; padding: 0;
+}
+.fig-tab-close:hover { background: #d4d4d4; color: #000; }
+
+.fig-warning { margin: 0; padding: 0.4rem 1rem; background: #fff4e5; color: #8a5300; border-bottom: 1px solid #f0d3a8; font-size: 0.85rem; }
+
+/* ---- Figures ---- */
+.fig-main { flex: 1 1 auto; overflow-y: auto; padding: 0.9rem 1rem 2rem; }
+.fig-empty { max-width: 640px; margin: 3rem auto; text-align: center; color: var(--fig-dim); }
+.fig-empty h2 { color: var(--fig-text); font-weight: 600; font-size: 1.2rem; }
+.fig-figure {
+  background: var(--fig-panel); border: 1px solid var(--fig-border); border-radius: 4px;
+  padding: 0.8rem 1rem 1rem; max-width: 1500px; margin: 0 auto;
+}
+.fig-figure[hidden] { display: none; }
+.fig-caption { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+.fig-title { margin: 0; font-size: 1.05rem; font-weight: 600; }
+.fig-meta { color: var(--fig-dim); font-size: 0.82rem; }
+
+.fig-metrics { display: flex; flex-wrap: wrap; gap: 0.4rem 2rem; margin: 0.3rem 0 0.6rem; }
+.fig-metric { display: flex; flex-direction: column; }
+.fig-metric-value { font-size: 1.35rem; font-weight: 600; color: var(--fig-accent); font-variant-numeric: tabular-nums; }
+.fig-metric-label { font-size: 0.72rem; color: var(--fig-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+.fig-metric-label .u { text-transform: none; }
+
+.fig-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.7rem; margin: 0.2rem 0 0.4rem; }
+.fig-label { font-size: 0.85rem; color: #333; }
+.fig-num { width: 4.5rem; font: inherit; font-size: 0.85rem; padding: 0.2rem 0.35rem; border: 1px solid #adadad; border-radius: 3px; }
+.fig-check { font-size: 0.85rem; display: inline-flex; align-items: center; gap: 0.3rem; }
+.fig-seg { display: inline-flex; border: 1px solid #adadad; border-radius: 3px; overflow: hidden; }
+.fig-seg-btn { font: inherit; font-size: 0.82rem; padding: 0.25rem 0.65rem; border: none; background: #fdfdfd; cursor: pointer; }
+.fig-seg-btn + .fig-seg-btn { border-left: 1px solid #adadad; }
+.fig-seg-btn.active { background: #cce4f7; color: #003e6b; }
+.fig-answer { font-weight: 600; color: #163e6b; }
+.fig-answer-raw { font-size: 0.8rem; color: var(--fig-dim); }
+.fig-hint { margin: 0.2rem 0 0.4rem; font-size: 0.8rem; color: var(--fig-dim); }
+.fig-hint .k-red { color: #d40000; }
+.fig-hint .k-blue { color: #0000e6; }
+.fig-status { margin: 0.25rem 0 0.9rem; font-size: 0.82rem; color: #333; }
+
+.fig-chart { display: block; width: 100%; border: 1px solid #d9d9d9; background: #fff; }
+.fig-chart-main { height: 440px; }
+.fig-chart-mid { height: 300px; margin-bottom: 0.6rem; }
+.fig-chart-fft { height: 280px; }
+.fig-chart-phase { height: 300px; }
+
+.fig-pending { display: flex; align-items: center; gap: 0.7rem; padding: 2.5rem 1rem; color: var(--fig-dim); justify-content: center; }
+.fig-spinner {
+  width: 18px; height: 18px; border-radius: 50%; border: 2px solid #c9d8e6; border-top-color: var(--fig-accent);
+  animation: fig-spin 0.9s linear infinite;
+}
+@keyframes fig-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .fig-spinner { animation: none; } }
